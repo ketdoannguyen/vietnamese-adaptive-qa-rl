@@ -3,8 +3,9 @@
 Rules this module obeys:
 - Only *visible* information becomes a feature. No gold answer, no answerability flag,
   no teacher Q-value, no reward. ``tests/test_policy_gradient.py`` asserts this.
-- The scaler is fitted on **train** only and persisted with the policy, then reapplied
-  unchanged to validation and test.
+- Features are **raw** here. The scaler is fitted on **train** only, persisted with the
+  policy (``scaler.json``), and applied exactly once — at the network input, via
+  ``TorchScaler`` (``src/rl/policy.py``). Never a second time in the numpy path.
 - The reader's ``null_margin`` and ``non_null_score`` are treated as uncalibrated scores,
   never as a probability the answer is correct.
 """
@@ -83,17 +84,21 @@ def feature_names() -> list[str]:
 
 
 class FeatureExtractor:
-    """Turns an observation (plus frozen Laya probabilities) into a float32 vector."""
+    """Turns an observation (plus frozen Laya probabilities) into a raw float32 vector.
 
-    def __init__(self, scaler: FeatureScaler | None = None) -> None:
-        self.scaler = scaler
+    Standardisation is deliberately *not* applied here: every torch consumer builds a
+    ``TorchScaler`` from the persisted ``FeatureScaler`` and applies it once at the network
+    input, so there is exactly one standardisation point in every path.
+    """
+
+    def __init__(self) -> None:
         self.names = feature_names()
 
     @property
     def dim(self) -> int:
         return len(self.names)
 
-    def raw_vector(self, obs: dict, laya_probs: Sequence[float] | None = None) -> np.ndarray:
+    def vector(self, obs: dict, laya_probs: Sequence[float] | None = None) -> np.ndarray:
         candidate = obs.get("candidate", {})
         retrieval = obs.get("retrieval", {})
         mask = np.asarray(obs.get("action_mask"), dtype=bool)
@@ -151,15 +156,9 @@ class FeatureExtractor:
             out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         return out
 
-    def vector(self, obs: dict, laya_probs: Sequence[float] | None = None) -> np.ndarray:
-        raw = self.raw_vector(obs, laya_probs)
-        if self.scaler is None:
-            return raw
-        return self.scaler.transform(raw.reshape(1, -1))[0]
-
     def matrix(self, observations: list[dict],
                laya_probs: list[Sequence[float]] | None = None) -> np.ndarray:
-        rows = [self.raw_vector(o, None if laya_probs is None else laya_probs[i])
+        rows = [self.vector(o, None if laya_probs is None else laya_probs[i])
                 for i, o in enumerate(observations)]
         return np.vstack(rows) if rows else np.zeros((0, self.dim), dtype=np.float32)
 

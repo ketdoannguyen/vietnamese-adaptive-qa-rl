@@ -60,12 +60,13 @@ def abstain_world() -> EpisodeWorld:
     )
 
 
-def make_trainer(worlds, *, config: RLConfig | None = None, seed: int = 0) -> ReinforceTrainer:
+def make_trainer(worlds, *, config: RLConfig | None = None, seed: int = 0,
+                 run_dir=None) -> ReinforceTrainer:
     cfg = config or RLConfig(max_updates=40, batch_episodes=8, eval_every=10,
                              eval_episodes=16, hidden_dim=32)
     env = AdaptiveQAEnv(list(worlds), default_calculator(), EnvConfig(max_optional_search=0))
     val = AdaptiveQAEnv(list(worlds), default_calculator(), EnvConfig(max_optional_search=0))
-    return ReinforceTrainer(env, val, cfg, seed=seed)
+    return ReinforceTrainer(env, val, cfg, seed=seed, run_dir=run_dir)
 
 
 # ---------------------------------------------------------------- unit level
@@ -101,7 +102,7 @@ def test_features_never_contain_gold_labels():
     env = trainer.train_env
     obs, _ = env.reset(seed=0, options={"qid": "q:answer"})
     assert find_forbidden_keys(obs) == []
-    vec = trainer.extractor.raw_vector(obs, None)
+    vec = trainer.extractor.vector(obs, None)
     assert np.all(np.isfinite(vec))
     assert vec.shape[0] == trainer.extractor.dim
 
@@ -232,6 +233,100 @@ def test_training_loop_records_a_real_log_with_param_deltas():
     assert all(np.isfinite(first[k]) for k in ("policy_loss", "value_loss", "entropy"))
 
 
+def _scripted_evaluate(monkeypatch, rewards):
+    """Replace val evaluation with a scripted reward sequence (control-flow tests only."""
+    from src.rl import reinforce as reinforce_mod
+
+    scripted = iter(rewards)
+
+    def fake(env, net, extractor, scaler_t, laya_fn, *, episodes, device, seed_base=10_000):
+        return {"mean_reward": next(scripted), "std_reward": 0.0, "mean_length": 2.0,
+                "episodes": episodes, "action_counts": {"0": 1, "1": 1, "2": 0, "3": 1}}
+
+    monkeypatch.setattr(reinforce_mod, "evaluate", fake)
+
+
+def test_best_checkpoint_is_written_once_and_never_overwritten(tmp_path, monkeypatch):
+    """Regression: train() used to re-save best/ with the final update's weights."""
+    from pathlib import Path
+    trainer = make_trainer([answerable_world(), abstain_world()],
+                           config=RLConfig(max_updates=3, batch_episodes=4, eval_every=1,
+                                           eval_episodes=4, hidden_dim=16,
+                                           early_stop_patience=99),
+                           run_dir=tmp_path / "rl")
+    _scripted_evaluate(monkeypatch, [1.0, 0.5, 0.8])  # best at update 1, training continues
+
+    best_saves: list[np.ndarray] = []
+    real_save = ReinforceTrainer.save
+
+    def spy_save(self, path):
+        real_save(self, path)
+        if Path(path).name == "best":
+            best_saves.append(_params(self.net))
+
+    monkeypatch.setattr(ReinforceTrainer, "save", spy_save)
+    result = trainer.train()
+
+    assert result["best_update"] == 1
+    assert len(best_saves) == 1, "best/ must be written exactly once — at the best update"
+    best = PolicyNet.load(tmp_path / "rl" / "best" / "policy.safetensors")
+    assert np.allclose(_params(best), best_saves[0])
+    assert not np.allclose(_params(best), _params(trainer.net)), \
+        "later gradient steps moved the weights; best/ must not hold them"
+
+
+def test_early_stop_update_is_logged_like_every_other_update(tmp_path, monkeypatch):
+    """Regression: the update that trips early stopping was dropped from the log."""
+    from src.utils.io import read_jsonl
+    trainer = make_trainer([answerable_world(), abstain_world()],
+                           config=RLConfig(max_updates=10, batch_episodes=2, eval_every=1,
+                                           eval_episodes=2, hidden_dim=16,
+                                           early_stop_patience=1),
+                           run_dir=tmp_path / "rl")
+    _scripted_evaluate(monkeypatch, [1.0, 0.5])  # update 1 improves, update 2 does not
+
+    result = trainer.train()
+    assert result["stopped_early"] is True
+    assert [row["update"] for row in result["updates"]] == [1, 2]
+    assert result["updates"][-1]["val"]["mean_reward"] == 0.5
+    assert trainer.history == result["updates"]
+    log = read_jsonl(tmp_path / "rl" / "train_log.jsonl")
+    assert [row["update"] for row in log] == [1, 2]
+
+
+def test_features_reach_the_network_standardised_exactly_once():
+    """Regression: extractor.vector() used to pre-standardise and rollout applied the
+    scaler again, so the net input was doubly standardised while transition features
+    (used by reinforce_loss) were not."""
+    trainer = make_trainer([answerable_world(), abstain_world()])
+    trainer.fit_scaler(episodes=4)
+    net = trainer.build()
+    captured: list[torch.Tensor] = []
+    real_forward = net.forward
+
+    def spy(x):
+        captured.append(x.detach().clone())
+        return real_forward(x)
+
+    net.forward = spy
+    obs, _ = trainer.train_env.reset(seed=0, options={"qid": "q:answer"})
+    raw = trainer.extractor.vector(obs, None)
+    expected = trainer.scaler_t(torch.as_tensor(raw, dtype=torch.float32).unsqueeze(0))
+    rollout(trainer.train_env, net, trainer.extractor, trainer.scaler_t, None,
+            seed=0, qid="q:answer", greedy=True)
+
+    assert captured, "rollout must feed the network through forward()"
+    assert torch.allclose(captured[0], expected, atol=1e-5), \
+        "net input must be the raw features standardised exactly once"
+    assert not torch.allclose(captured[0], torch.as_tensor(raw).unsqueeze(0), atol=1e-3), \
+        "the scaler is not the identity here: a raw pass-through would be a different bug"
+
+
+def _params(net: PolicyNet | None) -> np.ndarray:
+    assert net is not None
+    return np.concatenate([p.detach().cpu().numpy().ravel() for p in net.parameters()])
+
+
 def test_policy_round_trip_preserves_behaviour(tmp_path):
     trainer = make_trainer([answerable_world()])
     net = trainer.build()
@@ -240,7 +335,7 @@ def test_policy_round_trip_preserves_behaviour(tmp_path):
     reloaded = PolicyNet.load(tmp_path / "ckpt" / "policy.safetensors")
     obs, _ = trainer.train_env.reset(seed=0, options={"qid": "q:answer"})
     x = torch.as_tensor(trainer.scaler.transform(
-        trainer.extractor.raw_vector(obs, None).reshape(1, -1)), dtype=torch.float32)
+        trainer.extractor.vector(obs, None).reshape(1, -1)), dtype=torch.float32)
     with torch.no_grad():
         a, _ = net(x)
         b, _ = reloaded(x)

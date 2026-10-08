@@ -95,9 +95,9 @@ def rollout(env: AdaptiveQAEnv, net: PolicyNet, extractor: FeatureExtractor,
         # under — recomputing it after the step would train on a different state.
         action_mask = np.asarray(obs["action_mask"], dtype=bool)
         probs = laya_fn(obs) if laya_fn is not None else None
-        raw = extractor.vector(obs, probs)
-        x = torch.as_tensor(raw, dtype=torch.float32, device=device).unsqueeze(0)
-        if scaler_t is not None:
+        features = extractor.vector(obs, probs)
+        x = torch.as_tensor(features, dtype=torch.float32, device=device).unsqueeze(0)
+        if scaler_t is not None:  # the one and only standardisation point
             x = scaler_t(x)
         mask_t = torch.as_tensor(action_mask, dtype=torch.bool, device=device).unsqueeze(0)
         with torch.no_grad():
@@ -109,7 +109,7 @@ def rollout(env: AdaptiveQAEnv, net: PolicyNet, extractor: FeatureExtractor,
             entropy = float(dist.entropy().item())
         obs, reward, terminated, truncated, _ = env.step(action)
         episode.transitions.append(Transition(
-            features=raw, mask=action_mask, action=action, log_prob=log_prob,
+            features=features, mask=action_mask, action=action, log_prob=log_prob,
             value=float(value.item()), entropy=entropy, reward=float(reward)))
         episode.total_reward += float(reward)
         done = terminated or truncated
@@ -125,6 +125,7 @@ def reinforce_loss(episodes: list[Episode], net: PolicyNet, scaler_t: Any | None
         rewards = [t.reward for t in episode.transitions]
         returns = discounted_returns(rewards, config.gamma)
         for t, transition in enumerate(episode.transitions):
+            # ``transition.features`` is raw; standardise here, exactly as rollout did.
             x = torch.as_tensor(transition.features, dtype=torch.float32,
                                 device=device).unsqueeze(0)
             if scaler_t is not None:
@@ -218,7 +219,6 @@ class ReinforceTrainer:
         self.scaler_t = TorchScaler(np.asarray(self.scaler.mean, dtype=np.float32),
                                     np.asarray(self.scaler.std, dtype=np.float32),
                                     self.scaler.clip)
-        self.extractor.scaler = self.scaler
         return self.scaler
 
     def build(self, d_in: int | None = None) -> PolicyNet:
@@ -284,7 +284,11 @@ class ReinforceTrainer:
                     patience += 1
                     if patience >= self.config.early_stop_patience:
                         result["stopped_early"] = True
+                        if self.run_dir:
+                            self.save(self.run_dir / "last")
+                            append_jsonl(self.run_dir / "train_log.jsonl", row)
                         self.history.append(row)
+                        result["updates"].append(row)
                         break
             if self.run_dir:
                 self.save(self.run_dir / "last")
@@ -294,8 +298,6 @@ class ReinforceTrainer:
 
         result["best_val_reward"] = best_val if best_val > float("-inf") else None
         result["best_update"] = best_update or None
-        if self.run_dir and best_update:
-            self.save(self.run_dir / "best")
         return result
 
     # -- persistence ---------------------------------------------------------
@@ -319,7 +321,6 @@ class ReinforceTrainer:
             self.scaler_t = TorchScaler(np.asarray(self.scaler.mean, dtype=np.float32),
                                         np.asarray(self.scaler.std, dtype=np.float32),
                                         self.scaler.clip)
-            self.extractor.scaler = self.scaler
 
 
 def _param_vector(net: nn.Module) -> np.ndarray:

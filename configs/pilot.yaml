@@ -1,0 +1,6 @@
+# Profile overlay: 100-question pilot — the first profile whose numbers may be reported
+# (clearly labelled as pilot scale). Only the data cap changes here; corpus/retrieval/
+# reward/training knobs stay identical to every other profile so stages remain comparable.
+
+data:
+  profile: pilot

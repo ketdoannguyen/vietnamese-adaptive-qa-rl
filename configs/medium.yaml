@@ -1,0 +1,6 @@
+# Profile overlay: 5,000-question medium run — the intended primary experiment scale for
+# this VPS when the wall-clock budget allows. Only the data cap changes here; every other
+# knob stays at base.yaml so comparisons across profiles are apples-to-apples.
+
+data:
+  profile: medium

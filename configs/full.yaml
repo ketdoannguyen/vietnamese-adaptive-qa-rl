@@ -1,0 +1,6 @@
+# Profile overlay: uncapped strict splits (train ~19.9k / val ~4.3k / test ~4.3k questions
+# from the official train subset). Opportunistic — only run if medium finishes inside the
+# GPU-hour guardrail.
+
+data:
+  profile: full

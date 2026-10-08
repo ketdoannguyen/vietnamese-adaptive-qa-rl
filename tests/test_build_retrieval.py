@@ -11,9 +11,10 @@ import json
 
 import pytest
 
+from src.data import artifacts
 from src.pipeline import build_retrieval as br
 from src.utils.config import load_config
-from src.utils.io import read_jsonl, write_jsonl
+from src.utils.io import read_jsonl, write_jsonl, write_parquet
 from src.utils.runs import RunRegistry
 from tests import retrieval_stub
 
@@ -55,12 +56,11 @@ def cfg(tmp_path, monkeypatch):
     conf = load_config(None)
     processed, scenarios = tmp_path / "processed", tmp_path / "scenarios"
     processed.mkdir(), scenarios.mkdir()
-    write_jsonl(processed / br.DOCS_FILE,
-                [{"doc_id": k, "title_group": k, "text": v, "source_split": "train"}
-                 for k, v in DOCS.items()])
-    write_jsonl(processed / f"{SPLIT}_questions.jsonl",
-                [{"qid": q, "question": t} for q, t in QUESTIONS.items()])
-    write_jsonl(scenarios / f"{SPLIT}_scenarios.jsonl", SCENARIOS)
+    write_parquet(processed / f"docs_{SPLIT}.parquet",
+                  [{"doc_id": k, "text": v} for k, v in DOCS.items()])
+    write_parquet(processed / f"questions_{SPLIT}.parquet",
+                  [{"qid": q, "question": t} for q, t in QUESTIONS.items()])
+    write_jsonl(artifacts.scenarios_path(scenarios, SPLIT), SCENARIOS)
     conf["paths"] = {**conf["paths"],
                      "data_processed": str(processed), "data_scenarios": str(scenarios),
                      "data_indexes": str(tmp_path / "indexes"),

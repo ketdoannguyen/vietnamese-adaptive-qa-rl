@@ -3,12 +3,10 @@
     python -m src.pipeline.build_retrieval --profile smoke
     python -m src.pipeline.build_retrieval --profile smoke --cache-only
 
-Interface with P1 (SQL-free, file-based, both sides one line to change):
-
-* ``data/processed/docs.jsonl``          — one ``DocumentRecord.to_public_dict()`` per line
-* ``data/processed/{split}_questions.jsonl`` — ``QuestionRecord.to_row()`` (questions only
-  are read here; the private columns are ignored)
-* ``data/scenarios/{split}_scenarios.jsonl`` — ``ScenarioRecord.to_row()``
+Interface with P1: consumed exclusively through :mod:`src.data.artifacts`, the supported
+reader for the P1 files (``docs_{split}.parquet`` / ``questions_{split}.parquet`` under
+``data/processed``, ``scenarios_{short}.jsonl`` under ``data/scenarios``). Only questions
+are read from the label store; the private columns are ignored.
 
 Outputs, all registered with SHA256 in ``outputs/runs/index.jsonl``:
 
@@ -29,6 +27,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from src.data import artifacts
 from src.data.schemas import ScenarioRecord
 from src.retrieval.dense import DenseBank, DenseEncoder
 from src.retrieval.engine import ScenarioRanking, rank_scenario
@@ -40,57 +39,25 @@ from src.utils.reproducibility import capture_library_versions
 from src.utils.runs import RunRegistry, now_iso
 
 CACHE_VERSION = "v1"
-DOCS_FILE = "docs.jsonl"
-SPLITS = ("train_strict", "val_strict", "test_strict")
+SPLITS = artifacts.STRICT_SPLITS
 DIFF_EXAMPLES = 20
 
 
 # ---------------------------------------------------------------------------- inputs
 
-def docs_path(cfg: dict) -> Path:
-    return resolve(cfg, "data_processed") / DOCS_FILE
-
-
-def questions_path(cfg: dict, split: str) -> Path:
-    return resolve(cfg, "data_processed") / f"{split}_questions.jsonl"
-
-
-def scenarios_path(cfg: dict, split: str) -> Path:
-    return resolve(cfg, "data_scenarios") / f"{split}_scenarios.jsonl"
-
-
-def _require(path: Path, hint: str) -> Path:
-    if not path.exists():
-        siblings = sorted(p.name for p in path.parent.glob("*")) if path.parent.exists() else []
-        raise FileNotFoundError(f"{path} not found — {hint}. Present: {siblings[:20]}")
-    return path
-
-
-def load_docs(cfg: dict) -> dict[str, str]:
-    """doc_id -> passage text. Documents carry no labels, so this map is safe to hold."""
-    docs = {}
-    for row in read_jsonl(_require(docs_path(cfg), "run the P1 preprocess step first")):
-        docs[row["doc_id"]] = row["text"]
-    if not docs:
-        raise ValueError(f"{docs_path(cfg)} contains no documents")
-    return docs
+def load_docs(cfg: dict, splits: Sequence[str] = SPLITS) -> dict[str, str]:
+    """doc_id -> passage text across the requested strict splits. Documents carry no
+    labels, so this map is safe to hold."""
+    return artifacts.read_docs_all(resolve(cfg, "data_processed"), splits)
 
 
 def load_questions(cfg: dict, split: str) -> dict[str, str]:
     """qid -> question text (``QuestionRecord.public_view`` only)."""
-    return {row["qid"]: row["question"]
-            for row in read_jsonl(_require(questions_path(cfg, split), "run P1 preprocess") )}
+    return artifacts.question_texts(resolve(cfg, "data_processed"), split)
 
 
 def load_scenarios(cfg: dict, split: str) -> list[ScenarioRecord]:
-    rows = read_jsonl(_require(scenarios_path(cfg, split), "run P1 scoring/splitting"))
-    return [ScenarioRecord(scenario_id=r["scenario_id"], qid=r["qid"], split=r["split"],
-                           corpus_doc_ids=tuple(r["corpus_doc_ids"]),
-                           scenario_seed=r["scenario_seed"], gold_doc_id=r.get("gold_doc_id"),
-                           reachable_bm25=r.get("reachable_bm25"),
-                           reachable_dense=r.get("reachable_dense"),
-                           difficulty=r.get("difficulty") or {})
-            for r in rows]
+    return artifacts.read_scenarios(resolve(cfg, "data_scenarios"), split)
 
 
 # ------------------------------------------------------------------------ config hash
@@ -152,7 +119,8 @@ def build_bank(cfg: dict, docs: Mapping[str, str], needed: Iterable[str]) -> tup
         ordered = sorted(set(needed))
         missing = [d for d in ordered if d not in docs]
         if missing:
-            raise KeyError(f"{len(missing)} scenario doc(s) missing from {DOCS_FILE}, e.g. {missing[:3]}")
+            raise KeyError(f"{len(missing)} scenario doc(s) missing from the processed "
+                           f"docs parquet files, e.g. {missing[:3]}")
         bank = DenseBank.build({d: docs[d] for d in ordered}, encoder)
     finally:
         encoder.unload()  # never leave the encoder resident next to the reader/Laya
@@ -262,7 +230,7 @@ def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Ma
             for scenario in todo:
                 if scenario.qid not in questions:
                     raise KeyError(f"{scenario.qid} from {split} scenarios has no question row in "
-                                   f"{questions_path(cfg, split)}")
+                                   f"{artifacts.questions_path(resolve(cfg, 'data_processed'), split)}")
                 ranking = rank_scenario(
                     scenario_id=scenario.scenario_id, qid=scenario.qid,
                     question=questions[scenario.qid],
@@ -387,7 +355,7 @@ def run(*, cfg: dict, profile: str, splits: Sequence[str] = SPLITS, force: bool 
     registry.append(run_id=run_id, stage="P2_retrieval", status="RUNNING", profile=profile,
                     splits=list(splits), force=force, cache_only=cache_only)
     try:
-        docs = load_docs(cfg)
+        docs = load_docs(cfg, splits)
         config_sha = retrieval_config_sha(cfg)
         scenarios_by_split = {s: load_scenarios(cfg, s) for s in splits}
         needed = {d for scenarios in scenarios_by_split.values() for s in scenarios

@@ -315,6 +315,7 @@ def build_worlds(cfg: Mapping[str, Any], split: str, *, limit: int | None = None
     config = env_config(cfg)
     _check_state_cache_budget(meta, config)
     _check_state_cache_sources(cfg, split, meta)
+    _check_state_cache_reader(cfg, meta)
 
     worlds: list[EpisodeWorld] = []
     for scenario in scenarios:
@@ -402,6 +403,25 @@ def _check_state_cache_sources(cfg: Mapping[str, Any], split: str,
         raise ValueError(
             f"the P3 state cache for {split} is stale: {', '.join(drifted)} changed since "
             "it was built; rerun cache_reader (P3) before building worlds")
+
+
+def _check_state_cache_reader(cfg: Mapping[str, Any], meta: Mapping[str, Any]) -> None:
+    """The cache bakes reader outputs, threshold included; the reader contract must match.
+
+    ``train_reader --reselect`` (D010) can rewrite ``null_score_diff_threshold`` without
+    touching the weights, and the state cache would keep serving candidate decisions made
+    with the old threshold while the contract reports the new one. Fail fast instead: the
+    threshold-dependent states are rebuilt by cache_reader (P3).
+    """
+    _, contract = cache_reader.read_contract(cfg)
+    fields = ("reader_model_hash", "tokenizer_sha", "inference_config_sha",
+              "null_score_diff_threshold")
+    drifted = [field for field in fields if meta.get(field) != contract.get(field)]
+    if drifted:
+        raise ValueError(
+            f"the P3 state cache was built with a different reader contract "
+            f"(drifted: {', '.join(drifted)}); rerun cache_reader (P3) so the cached "
+            "candidates match the frozen reader")
 
 
 def _private(scenario: Any, gold_row: Mapping[str, Any],

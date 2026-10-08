@@ -169,6 +169,12 @@ def write_split(cfg: Mapping[str, Any], split: str, n: int) -> dict[str, Any]:
 def write_all(cfg: Mapping[str, Any], *, n_train: int = 3, n_val: int = 2) -> dict[str, dict]:
     """``train_strict`` / ``val_strict`` fixtures plus the empty ``test_strict`` docs file."""
     write_parquet(artifacts.docs_path(cfg["paths"]["data_processed"], "test_strict"), [])
+    # The reader contract the real `train_reader` writes; build_worlds refuses a state
+    # cache whose recorded reader fields drifted from it (D013).
+    atomic_write_json(train_reader.reader_dir(cfg) / train_reader.INFERENCE_FILE, {
+        "reader_model_hash": READER_MODEL_HASH, "tokenizer_sha": TOKENIZER_SHA,
+        "inference_config_sha": INFERENCE_CONFIG_SHA,
+        "null_score_diff_threshold": NULL_SCORE_DIFF_THRESHOLD})
     return {"train_strict": write_split(cfg, "train_strict", n_train),
             "val_strict": write_split(cfg, "val_strict", n_val)}
 

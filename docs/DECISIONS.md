@@ -474,3 +474,24 @@ BM25 other-title picks; the 0.5/1.0/0.0 ratios place the expected hard/random co
 are deterministic for a fixed pool/seed/version; changing the gold *answer* leaves the
 corpus byte-identical (no label leak); the summary records the hardness distribution. Full
 suite green (341 passed, 1 skipped).
+
+## D013 — Reader-contract staleness guard at the state-cache boundary (2026-10-08)
+
+**Defect (latent, never fired).** The P3 state cache bakes the reader's candidate decisions
+— including the `null_score_diff_threshold` — but nothing compared those decisions to the
+*frozen reader's current contract* (`reader_inference.json`). `train_reader --reselect`
+(D010) rewrites only the threshold, without touching the weights, so a reselect after a
+cache rebuild would leave worlds serving candidates decided under the old threshold while
+every downstream report claims the new one. No published number is affected: the D011 chain
+ordered cache_reader before --reselect and the threshold happened to re-confirm at 0.5, and
+no cache has been rebuilt since. Found while planning the D012 rebuild order.
+
+**Fix.** `worlds._check_state_cache_reader` compares the cache meta's `reader_model_hash`,
+`tokenizer_sha`, `inference_config_sha` and `null_score_diff_threshold` against the current
+contract read by `cache_reader.read_contract` and raises, naming the drifted fields and the
+stage to rerun. The D012 rebuild therefore orders build_retrieval → train_reader --reselect
+→ cache_reader → make_teacher, so the cache always bakes the final threshold.
+
+**Tests.** `test_a_state_cache_for_a_reselected_reader_is_refused` (a threshold edit in the
+contract refuses world-building); the P5 fixture now writes the contract file the way the
+real stage does. Full suite green.

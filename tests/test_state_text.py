@@ -14,10 +14,11 @@ import pytest
 
 from src.decision import state_text
 from src.decision.schema import ACTION_ORDER
-from src.pipeline import build_retrieval, worlds
+from src.pipeline import build_retrieval, train_reader, worlds
 from src.rl.env import ANSWER, SEARCH_BM25, SEARCH_DENSE, AdaptiveQAEnv
 from src.rl.reward import RewardCalculator, RewardConfig
 from src.utils.hashing import sha256_text
+from src.utils.io import atomic_write_json, read_json
 from tests import p5_fixtures as fx
 
 
@@ -143,4 +144,20 @@ def test_a_state_cache_over_changed_sources_is_refused(tmp_path):
     with rankings.open("a", encoding="utf-8") as handle:
         handle.write("\n")  # any byte-level change must be detected
     with pytest.raises(ValueError, match="stale.*rankings changed.*rerun cache_reader"):
+        worlds.build_worlds(cfg, "train_strict", laya_regime=None)
+
+
+def test_a_state_cache_for_a_reselected_reader_is_refused(tmp_path):
+    """D013: the cache bakes candidate decisions; a drifted reader contract must refuse.
+
+    ``train_reader --reselect`` rewrites the threshold without touching the weights, so
+    serving a cache built under the old threshold would silently change the environment.
+    """
+    cfg = fx.p5_config(tmp_path)
+    fx.write_all(cfg, n_train=2, n_val=1)
+    contract_path = train_reader.reader_dir(cfg) / train_reader.INFERENCE_FILE
+    contract = read_json(contract_path)
+    contract["null_score_diff_threshold"] = 2.0
+    atomic_write_json(contract_path, contract)
+    with pytest.raises(ValueError, match="reader contract.*rerun cache_reader"):
         worlds.build_worlds(cfg, "train_strict", laya_regime=None)

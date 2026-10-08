@@ -5,7 +5,7 @@ P1 (`src/pipeline/audit_split.py`) writes, per strict split:
 * ``data/processed/docs_{split}.parquet``      — ``doc_id``, ``text`` (normalized), ``text_raw``
 * ``data/processed/questions_{split}.parquet`` — the **label store**: gold answers,
   ``is_impossible``, ``gold_doc_id``. Never an observation, never a prompt.
-* ``data/scenarios/{short}_scenarios.jsonl``   — ``ScenarioRecord.to_row()``
+* ``data/scenarios/scenarios_{short}.jsonl``   — ``ScenarioRecord.to_row()``
 
 Split keys are ``train_strict`` / ``val_strict`` / ``test_strict``; the file names use that
 key directly for docs/questions and its short form (``train``) for scenarios. Answer offsets

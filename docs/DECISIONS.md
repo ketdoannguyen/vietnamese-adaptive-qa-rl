@@ -53,3 +53,57 @@ Per `06_REFERENCES/01_ASSUMPTIONS_LICENSES_AND_RISKS.md` and the dataset section
 `01_SPECIFICATIONS/04_DATASET_VALIDITY_AND_LEAKAGE.md`, the redistribution licence of
 `taidng/UIT-ViQuAD2.0` is **not verified**. Raw data is therefore never committed and
 `data/` is git-ignored. Only derived, aggregate diagnostics are reported.
+
+## D006 — Negative-audit ambiguity counts distractor documents only (2026-10-08)
+
+Spec `01_SPECIFICATIONS/04_DATASET_VALIDITY_AND_LEAKAGE.md` §6 requires ambiguous
+negatives to be flagged (not dropped) and their counts reported openly. The P1 heuristic
+(`src/data/auditor.py`) originally counted `lexical_coverage>=0.70`, `reader_proxy>=0.80`
+and a plausible-answer hit on *every* corpus document — including the question's own gold
+doc. For a SQuAD2-style negative the gold doc is *expected* to overlap the question and
+hold its plausible answers, so the audit flagged essentially every negative and the flag
+became useless for the trainer. Measured on the HEAD run (pilot profile, cap 100/split):
+95/95 pilot negatives flagged (rate 1.000; train 33/33, val 29/29, test 33/33), all 95
+with gold-doc signals; smoke 20/20.
+
+**Decision.** Ambiguity is counted on **distractor documents only** — corpus documents
+other than the question's `gold_doc_id`. Signals on the gold doc are reported as an
+informational count and are *never* ambiguity. The plausible-answer matcher also changed
+from raw substring to token-sequence matching: on the pilot distractor hits, 30 substring
+hits included 16 fragment matches ("ba" inside "bàn", "Hạ" inside "hạn"), i.e. 14 real
+hits — token matching keeps those 14 and drops the fragments.
+
+**Thresholds (judged on measured pilot data, train/val only — never on `test_strict`).**
+`lexical_coverage>=0.70` and `reader_proxy>=0.80` kept: across 1140 distractor documents
+none reaches either threshold (distractor coverage p50 0.10 / p90 0.29; reader proxy p50
+0.07 / p90 0.17), while gold docs sit at coverage p50 0.75 / p90 1.00 — the thresholds
+cleanly separate the two sides. Sensitivity grid (cov 0.5/0.6/0.7/0.8/0.9 × proxy
+0.7/0.8/0.9): flagged counts per split go 5/2/10 → 2/2/4 → 1/1/4 and stay flat for every
+cov >= 0.70; proxy moves nothing. At 0.70/0.80 all pilot flags come from
+plausible-answer-in-distractor (14 hits), none from the lexical thresholds.
+
+**Before/after (real runs, pilot profile, 95 negatives; test shown for transparency only):**
+
+| split | negatives | flagged before (any doc incl. gold) | flagged after (distractors only) | gold-doc signals (informational) |
+|---|---|---|---|---|
+| train_strict | 33 | 33 (rate 1.000) | 1 (0.030) | 33 |
+| val_strict | 29 | 29 (1.000) | 1 (0.034) | 29 |
+| test_strict | 33 | 33 (1.000) | 4 (0.121) | 33 |
+| all | 95 | 95 (1.000) | 6 (0.063) | 95 |
+
+Smoke profile: 20/20 → 0/20. The heuristic is applied identically to all splits.
+
+**Plumbing (spec §6 policy).** The flag travels with the artifacts:
+`questions_{split}_strict.parquet.ambiguous_negative` (False for answerable rows),
+`difficulty.ambiguous_negative` on every scenario, and
+`data/processed/ambiguous_negatives.json` (`flagged_qids` + counts per strict split; note:
+"automated heuristic only; no human review"). The primary RL trainer skips flagged
+*train_strict* negatives from reward-bearing updates; val/test keep their flags so clean
+vs ambiguous negatives can be compared. Flagged counts are reported in
+`schema_report.md`, not hidden. Scenarios were also moved to
+`data/scenarios/scenarios_{train,val,test}.jsonl` (`cfg['paths']['data_scenarios']`) — the
+layout `src.data.artifacts` already reads — and the stale `data/processed/scenarios_*.jsonl`
+copies were removed.
+
+The flag is an automated heuristic; no human review was performed, and this is stated in
+the CSV, the report and the JSON alike.

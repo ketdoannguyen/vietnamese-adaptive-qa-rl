@@ -10,14 +10,16 @@ a public view (checked with :func:`src.data.schemas.find_forbidden_keys`).
 
 from __future__ import annotations
 
+import csv
 import json
 import unicodedata
 
 import pyarrow.parquet as pq
 import pytest
 
+from src.data import artifacts, auditor
 from src.data.normalizer import RecordNormalizer, normalize_text
-from src.data.schemas import ScenarioRecord, find_forbidden_keys
+from src.data.schemas import DocumentRecord, ScenarioRecord, find_forbidden_keys
 from src.utils.hashing import content_doc_id, normalize_title, sha256_text
 from tests.fixtures import tiny_raw as fx
 
@@ -223,7 +225,9 @@ def test_parquet_label_store_roundtrip_and_label_free_documents(tmp_path):
 
 def test_scenario_rows_keep_labels_out_of_the_public_part(tmp_path):
     fx.run_fixture_pipeline(tmp_path)
-    lines = (tmp_path / "processed" / "scenarios_train.jsonl").read_text(encoding="utf-8")
+    # the scenarios live under cfg['paths']['data_scenarios'] — the layout
+    # `src.data.artifacts` (the supported reader) expects
+    lines = (tmp_path / "scenarios" / "scenarios_train.jsonl").read_text(encoding="utf-8")
     rows = [json.loads(line) for line in lines.splitlines() if line.strip()]
     assert rows
     for row in rows:
@@ -238,6 +242,158 @@ def test_scenario_rows_keep_labels_out_of_the_public_part(tmp_path):
         assert row["scenario_seed"] == 42
         # private diagnostics are present, and only for the env/analysis side
         assert set(PRIVATE_SCENARIO_KEYS) <= set(row)
+        # the automated negative flag travels with every scenario (private side only)
+        assert isinstance(row["difficulty"].get("ambiguous_negative"), bool)
+
+
+# ------------------------------------------------------------------ negative audit (spec §6)
+
+def negative_row(row_id: str, context: str, question: str, plausible: str):
+    example = {"id": row_id, "title": "Auditor", "context": context, "question": question,
+               "answers": None, "is_impossible": True,
+               "plausible_answers": {"text": [plausible], "answer_start": [0]}}
+    return RecordNormalizer().normalize(example, "train")
+
+
+def document_record(text: str) -> DocumentRecord:
+    return DocumentRecord(doc_id=content_doc_id(text), title_group="auditor",
+                          text=text, source_split="train")
+
+
+def scenario_record_for(row, doc_ids) -> ScenarioRecord:
+    return ScenarioRecord(
+        scenario_id=f"sc:train_strict:{row.question.qid}:v1", qid=row.question.qid,
+        split="train_strict", corpus_doc_ids=tuple(doc_ids), scenario_seed=42,
+        gold_doc_id=row.question.private.gold_doc_id, difficulty={"answerable": False})
+
+
+def string_values(obj):
+    """Every string in a nested JSON-shaped object (used to scan for label leaks)."""
+    if isinstance(obj, dict):
+        for value in obj.values():
+            yield from string_values(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from string_values(value)
+    elif isinstance(obj, str):
+        yield obj
+
+
+def test_plausible_answer_matching_requires_whole_tokens():
+    # a short plausible answer must occur as its own token, not inside another word
+    assert auditor.plausible_hit(["ba"], "mức áp suất 1 bar") is None
+    assert auditor.plausible_hit(["ba"], "cầu bàn đá") is None
+    assert auditor.plausible_hit(["Hạ"], "hạn hán kéo dài") is None
+    # ... but a real occurrence matches, case-folded and as a token sequence
+    assert auditor.plausible_hit(["ba"], "ông Ba mươi tuổi") == "ba"
+    assert auditor.plausible_hit(["năm 2007"], "thành lập năm 2008") is None
+    assert auditor.plausible_hit(["năm 2007"], "ký kết năm 2007 tại Lisbon") == "năm 2007"
+
+
+def test_negative_ambiguity_ignores_the_gold_doc_and_flags_distractor_answers():
+    own_text = "Nguyễn Du là tác giả của Truyện Kiều."
+    other_text = "Nguyễn Du quê ở Hà Tĩnh."
+    neutral_text = "Hà Nội là thủ đô của Việt Nam."
+    ambiguous_text = "Truyện Kiều là kiệt tác của văn học Việt Nam."
+    docs = {doc.doc_id: doc for doc in
+            (document_record(own_text), document_record(other_text),
+             document_record(neutral_text), document_record(ambiguous_text))}
+    # (a) the plausible answer occurs only in the question's own gold doc: that is what
+    # is_impossible means for this dataset -> informational, never ambiguity
+    clean_row = negative_row("n1", own_text, "Ai viết Truyện Kiều?", "Nguyễn Du")
+    assert clean_row.question.private.gold_doc_id == content_doc_id(own_text)
+    clean = scenario_record_for(clean_row, [clean_row.question.private.gold_doc_id,
+                                            content_doc_id(neutral_text)])
+    # (b) the plausible answer occurs in a *distractor* document of the same corpus: a
+    # retriever could find an answer to an "impossible" question -> AMBIGUOUS
+    ambiguous_row = negative_row("n2", ambiguous_text, "Ai viết Truyện Kiều?", "Nguyễn Du")
+    ambiguous = scenario_record_for(ambiguous_row,
+                                    [ambiguous_row.question.private.gold_doc_id,
+                                     content_doc_id(other_text), content_doc_id(neutral_text)])
+    rows = {clean_row.question.qid: clean_row, ambiguous_row.question.qid: ambiguous_row}
+    csv_rows, summary, flags = auditor.audit_negatives([clean, ambiguous], rows, docs,
+                                                       size=10, seed=42)
+    assert flags == {"train:n1": False, "train:n2": True}
+    assert summary["flagged_negatives_all"] == 1
+    assert summary["signal_counts"] == {"plausible_answer_in_doc": 1}
+    assert summary["gold_doc_signal_counts"] == {"plausible_answer_in_doc": 1}
+    assert summary["human_review"] is False
+    bucket = summary["per_split"]["train_strict"]
+    assert (bucket["negatives"], bucket["flagged"], bucket["clean"]) == (2, 1, 1)
+    assert bucket["gold_doc_signal_negatives"] == 1
+    assert bucket["flagged_rate"] == 0.5
+    by_qid = {row["qid"]: row for row in csv_rows}
+    assert by_qid["train:n1"]["verdict"] == "clean"
+    assert by_qid["train:n2"]["verdict"] == "ambiguous"
+    assert by_qid["train:n1"]["ambiguous_flag"] == "false"
+    assert by_qid["train:n2"]["ambiguous_flag"] == "true"
+    for row in csv_rows:
+        assert "automated heuristic only; NO human review performed" in row["reviewer_note"]
+    clean_note = by_qid["train:n1"]["reviewer_note"]
+    assert "own gold doc carries 1 signal(s)" in clean_note
+    assert "never counted as ambiguity" in clean_note and "signals: none" in clean_note
+    assert "plausible_answer_in_doc=" in by_qid["train:n2"]["reviewer_note"]
+
+
+def test_ambiguous_negative_flag_lands_in_parquet_scenarios_and_json(tmp_path):
+    # whole-pool corpora: n_distractors far beyond the fixture pool and no cap per split, so
+    # every corpus holds every document of its strict split
+    fx.run_fixture_pipeline(tmp_path, profile="full", caps={"full": None}, n_distractors=1000)
+    processed, scenarios_dir = tmp_path / "processed", tmp_path / "scenarios"
+    rows = [r for name in ("train", "val", "test")
+            for r in pq.read_table(processed / f"questions_{name}_strict.parquet").to_pylist()]
+    by_qid = {r["qid"]: r for r in rows}
+    # the flag is a boolean on every row, and answerable rows are always False
+    assert all(isinstance(r["ambiguous_negative"], bool) for r in rows)
+    assert all(r["ambiguous_negative"] is False for r in rows if not r["is_impossible"])
+    # fixture rows 5 and 65: "Nguyễn Du" occurs in no document at all (signals stay on the
+    # question's own gold doc -> clean); "bốn" occurs in the sibling Delta document 60,
+    # which a whole-pool corpus always contains -> ambiguous
+    assert by_qid["train:5"]["ambiguous_negative"] is False
+    assert by_qid["train:65"]["is_impossible"] is True
+    assert by_qid["train:65"]["ambiguous_negative"] is True
+    # the same flag travels with every scenario, readable through the supported reader
+    scenario_flags = {}
+    for name in ("train", "val", "test"):
+        strict = f"{name}_strict"
+        assert artifacts.scenarios_path(scenarios_dir, strict) \
+            == scenarios_dir / f"scenarios_{name}.jsonl"
+        for scenario in artifacts.read_scenarios(scenarios_dir, strict):
+            assert "ambiguous_negative" in scenario.difficulty
+            scenario_flags[scenario.qid] = scenario.difficulty["ambiguous_negative"]
+    assert scenario_flags
+    for qid, flag in scenario_flags.items():
+        assert by_qid[qid]["ambiguous_negative"] is flag
+    # ... and the machine-readable list agrees, carrying the automated-only disclaimer
+    blob = json.loads((processed / "ambiguous_negatives.json").read_text(encoding="utf-8"))
+    assert set(blob) == {"method", "generated_by", "splits", "note"}
+    assert blob["note"] == "automated heuristic only; no human review"
+    assert blob["generated_by"].startswith("python -m src.pipeline.audit_split --profile full")
+    assert "DISTRACTOR" in blob["method"] and "never ambiguity" in blob["method"]
+    assert find_forbidden_keys(blob) == []
+    for name in ("train", "val", "test"):
+        strict = f"{name}_strict"
+        entries = {s.qid: s for s in artifacts.read_scenarios(scenarios_dir, strict)}
+        entry = blob["splits"][strict]
+        assert entry["flagged_qids"] == sorted(q for q, s in entries.items()
+                                               if s.difficulty["ambiguous_negative"])
+        assert entry["counts"]["negatives"] == sum(
+            1 for s in entries.values() if not s.difficulty["answerable"])
+        assert entry["counts"]["flagged"] == len(entry["flagged_qids"])
+    assert "train:65" in blob["splits"][by_qid["train:65"]["strict_split"]]["flagged_qids"]
+    # no label text leaks into the flag file as a value
+    label_texts = {t for r in rows
+                   for t in list(r["plausible_texts"] or []) + list(r["answer_texts"] or [])}
+    assert label_texts and not (label_texts & set(string_values(blob)))
+    # the sampled CSV claims no human review on every row
+    with open(tmp_path / "diagnostics" / "negative_audit.csv", encoding="utf-8") as fh:
+        audit_rows = list(csv.DictReader(fh))
+    assert audit_rows and all("NO human review" in r["reviewer_note"] for r in audit_rows)
+    # the generated report states the full-pass counts and the exclusion policy
+    report = (tmp_path / "diagnostics" / "schema_report.md").read_text(encoding="utf-8")
+    assert "Full pass" in report
+    assert "no human review was performed" in report
+    assert "skips flagged TRAIN negatives from reward-bearing" in report
 
 
 def test_unmappable_display_offset_is_reported_not_silently_dropped():

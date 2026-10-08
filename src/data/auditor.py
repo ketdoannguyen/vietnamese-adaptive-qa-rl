@@ -2,7 +2,9 @@
 
 Everything in this module is computed from the artifacts of the current run — no number
 is typed by hand and nothing is reported that was not measured. The negative audit is an
-*automated heuristic*; the CSV says so explicitly and never claims human review.
+*automated heuristic*; the CSV says so explicitly and never claims human review, and
+ambiguity is counted on distractor documents only — never on the question's own gold doc
+(see :func:`negative_signals`).
 """
 
 from __future__ import annotations
@@ -26,6 +28,14 @@ READER_PROXY_THRESHOLD = 0.80
 #: A window contains an answer-type token (number for when/how-many, capitalised token
 #: for who/where/what).
 _WINDOW_STRIDE = 4
+#: Description of the negative-ambiguity heuristic, used verbatim in the CSV, the report
+#: and the machine-readable flag file so all three always tell the same story.
+NEGATIVE_METHOD = (
+    f"automated lexical heuristics on DISTRACTOR documents only (a corpus document other "
+    f"than the question's own gold doc): plausible-answer token-sequence match in a "
+    f"distractor, lexical_coverage>={LEXICAL_COVERAGE_THRESHOLD:.2f}, "
+    f"reader_proxy>={READER_PROXY_THRESHOLD:.2f}; gold-doc signals are informational, "
+    f"never ambiguity")
 
 
 # --------------------------------------------------------------------------------------
@@ -243,11 +253,19 @@ def reader_proxy(question: str, text: str) -> float:
 
 
 def plausible_hit(plausible_texts: Sequence[str], text: str) -> str | None:
-    """Return a plausible answer (from the dataset's own annotation) found in ``text``."""
-    haystack = text.casefold()
+    """Return a plausible answer (from the dataset's own annotation) found in ``text``.
+
+    Matching is token-sequence based, not a raw substring: a short plausible answer such as
+    ``"ba"`` must occur as its own word, not inside another word (``"bàn"``). Measured on the
+    pilot audit, substring matching produced 16 of 30 distractor hits that were fragment
+    matches of this kind.
+    """
+    tokens = [t.casefold() for t in tokenize_words(text)]
     for candidate in plausible_texts:
-        needle = candidate.strip().casefold()
-        if len(needle) >= 2 and needle in haystack:
+        needle = [t.casefold() for t in tokenize_words(candidate)]
+        if len(candidate.strip()) < 2 or not needle or len(needle) > len(tokens):
+            continue
+        if any(tokens[i:i + len(needle)] == needle for i in range(len(tokens) - len(needle) + 1)):
             return candidate
     return None
 
@@ -282,6 +300,39 @@ def select_negatives(scenarios: Sequence[ScenarioRecord], size: int, *, seed: ob
     return selected
 
 
+def negative_signals(
+    question: str,
+    plausible_texts: Sequence[str],
+    doc_ids: Sequence[str],
+    docs_by_id: Mapping[str, DocumentRecord],
+    *,
+    gold_doc_id: str | None,
+) -> tuple[list[str], list[str]]:
+    """Return ``(distractor_signals, gold_doc_signals)`` for one negative question.
+
+    The question's own gold document is *expected* to overlap the question and to contain
+    its plausible answers — that is what ``is_impossible`` means for this dataset — so
+    signals on it are informational only and never count as ambiguity. The real risk is a
+    *distractor* document (same episodic corpus, different doc) that could plausibly
+    answer the question, which would invert the reward of `ABSTAIN`.
+    """
+    distractor: list[str] = []
+    gold: list[str] = []
+    for doc_id in doc_ids:
+        doc = docs_by_id[doc_id]
+        bucket = gold if doc_id == gold_doc_id else distractor
+        coverage = lexical_coverage(question, doc.text)
+        if coverage >= LEXICAL_COVERAGE_THRESHOLD:
+            bucket.append(f"lexical_coverage={coverage:.2f}@doc={doc_id[:12]}")
+        score = reader_proxy(question, doc.text)
+        if score >= READER_PROXY_THRESHOLD:
+            bucket.append(f"reader_proxy={score:.2f}@doc={doc_id[:12]}")
+        hit = plausible_hit(plausible_texts, doc.text)
+        if hit:
+            bucket.append(f"plausible_answer_in_doc={hit!r}@doc={doc_id[:12]}")
+    return distractor, gold
+
+
 def audit_negatives(
     scenarios: Sequence[ScenarioRecord],
     rows_by_qid: Mapping[str, NormalizedRow],
@@ -289,66 +340,90 @@ def audit_negatives(
     *,
     size: int,
     seed: object,
-) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    """Audit negatives with documented lexical heuristics; returns (csv rows, summary).
+) -> tuple[list[dict[str, str]], dict[str, Any], dict[str, bool]]:
+    """Audit negatives with documented distractor-only heuristics.
+
+    Returns ``(csv_rows, summary, ambiguous_by_qid)``. The CSV covers a deterministic
+    sample of at most ``size`` negatives; ``ambiguous_by_qid`` carries the verdict for
+    *every* negative, because the flag is stamped into the label store and the scenarios
+    for all rows — the sample and the full pass use the same heuristic, so a flag is
+    never extrapolated from a subsample.
 
     Columns: ``qid, split, docs, verdict, ambiguous_flag, reviewer_note``. The note always
     states that the verdict is automated and was not verified by a human.
     """
     selected = select_negatives(scenarios, size, seed=seed)
+    selected_qids = {s.qid for s in selected}
     rows_out: list[dict[str, str]] = []
-    n_ambiguous = 0
+    flags: dict[str, bool] = {}
     reasons: Counter[str] = Counter()
-    for scenario in selected:
+    gold_reasons: Counter[str] = Counter()
+    per_split: dict[str, dict[str, Any]] = {}
+    sample_ambiguous = 0
+    for scenario in scenarios:
+        if scenario.difficulty.get("answerable", True):
+            continue
         row = rows_by_qid[scenario.qid]
-        question = row.question.question
         private = row.question.private
-        corpus = list(scenario.corpus_doc_ids)
-        signals: list[str] = []
-        for doc_id in corpus:
-            doc = docs_by_id[doc_id]
-            coverage = lexical_coverage(question, doc.text)
-            if coverage >= LEXICAL_COVERAGE_THRESHOLD:
-                signals.append(f"lexical_coverage={coverage:.2f}@doc={doc_id[:12]}")
-                reasons["lexical_coverage"] += 1
-            score = reader_proxy(question, doc.text)
-            if score >= READER_PROXY_THRESHOLD:
-                signals.append(f"reader_proxy={score:.2f}@doc={doc_id[:12]}")
-                reasons["reader_proxy"] += 1
-            hit = plausible_hit(private.plausible_texts, doc.text)
-            if hit:
-                signals.append(f"plausible_answer_in_doc={hit!r}@doc={doc_id[:12]}")
-                reasons["plausible_answer_in_doc"] += 1
-        ambiguous = bool(signals)
-        n_ambiguous += int(ambiguous)
-        note = ("automated heuristic only; NO human review performed. "
-                "thresholds lexical_coverage>=0.70, reader_proxy>=0.80, plausible-answer substring.")
-        if signals:
-            note += " signals: " + "; ".join(signals[:6])
-            if len(signals) > 6:
-                note += f" (+{len(signals) - 6} more)"
+        distractor_signals, gold_signals = negative_signals(
+            row.question.question, private.plausible_texts, scenario.corpus_doc_ids,
+            docs_by_id, gold_doc_id=private.gold_doc_id)
+        ambiguous = bool(distractor_signals)
+        flags[scenario.qid] = ambiguous
+        for signal in distractor_signals:
+            reasons[signal.split("=", 1)[0]] += 1
+        for signal in gold_signals:
+            gold_reasons[signal.split("=", 1)[0]] += 1
+        bucket = per_split.setdefault(scenario.split, {"negatives": 0, "flagged": 0,
+                                                       "gold_doc_signal_negatives": 0})
+        bucket["negatives"] += 1
+        bucket["flagged"] += int(ambiguous)
+        bucket["gold_doc_signal_negatives"] += int(bool(gold_signals))
+        if scenario.qid not in selected_qids:
+            continue
+        sample_ambiguous += int(ambiguous)
+        note = f"automated heuristic only; NO human review performed. ambiguity = {NEGATIVE_METHOD}."
+        if gold_signals:
+            note += (f" own gold doc carries {len(gold_signals)} signal(s) — expected for a"
+                     f" negative question, informational only, never counted as ambiguity.")
+        if distractor_signals:
+            note += " signals: " + "; ".join(distractor_signals[:6])
+            if len(distractor_signals) > 6:
+                note += f" (+{len(distractor_signals) - 6} more)"
         else:
             note += " signals: none"
         rows_out.append({
             "qid": scenario.qid,
             "split": scenario.split,
-            "docs": ";".join(corpus),
+            "docs": ";".join(scenario.corpus_doc_ids),
             "verdict": "ambiguous" if ambiguous else "clean",
             "ambiguous_flag": "true" if ambiguous else "false",
             "reviewer_note": note,
         })
+    for split, bucket in per_split.items():
+        bucket["clean"] = bucket["negatives"] - bucket["flagged"]
+        bucket["flagged_rate"] = (round(bucket["flagged"] / bucket["negatives"], 6)
+                                  if bucket["negatives"] else None)
+    n_negatives = sum(b["negatives"] for b in per_split.values())
+    n_flagged = sum(b["flagged"] for b in per_split.values())
     summary = {
         "requested": size,
-        "negatives_available": sum(1 for s in scenarios if not s.difficulty.get("answerable", True)),
+        "negatives_available": n_negatives,
         "audited": len(rows_out),
-        "ambiguous": n_ambiguous,
-        "clean": len(rows_out) - n_ambiguous,
-        "ambiguous_rate": round(n_ambiguous / len(rows_out), 6) if rows_out else None,
+        "ambiguous": sample_ambiguous,
+        "clean": len(rows_out) - sample_ambiguous,
+        "ambiguous_rate": round(sample_ambiguous / len(rows_out), 6) if rows_out else None,
+        "flagged_negatives_all": n_flagged,
+        "flagged_rate_all": round(n_flagged / n_negatives, 6) if n_negatives else None,
+        "gold_doc_signal_negatives": sum(b["gold_doc_signal_negatives"]
+                                         for b in per_split.values()),
         "signal_counts": dict(reasons),
+        "gold_doc_signal_counts": dict(gold_reasons),
         "human_review": False,
-        "method": "automated lexical heuristics (lexical_coverage, reader_proxy, plausible-answer substring)",
+        "method": NEGATIVE_METHOD,
+        "per_split": per_split,
     }
-    return rows_out, summary
+    return rows_out, summary, flags
 
 
 # --------------------------------------------------------------------------------------
@@ -435,15 +510,34 @@ def write_schema_report(
         lines += ["## Negative audit", "",
                   f"Method: {negative_summary.get('method')}. Human review performed: "
                   f"`{negative_summary.get('human_review')}`.", ""]
-        lines += _table(["audited", "ambiguous", "clean", "ambiguous rate", "available", "requested"],
+        lines += _table(["audited (sample)", "ambiguous", "clean", "ambiguous rate", "available",
+                         "requested"],
                         [[negative_summary.get("audited"), negative_summary.get("ambiguous"),
                           negative_summary.get("clean"), negative_summary.get("ambiguous_rate"),
                           negative_summary.get("negatives_available"),
                           negative_summary.get("requested")]])
-        lines += ["", f"Signal counts: `{negative_summary.get('signal_counts')}`.", "",
-                  "Negative rows flagged `ambiguous` must not be used for reward in the primary "
-                  "analysis until a human resolves them (spec §6); the flag is available per row in "
-                  "`data/diagnostics/negative_audit.csv`.", ""]
+        per_split = negative_summary.get("per_split") or {}
+        if per_split:
+            lines += ["", "Full pass — every negative scenario was evaluated (the sample above is "
+                      "the CSV subset):", ""]
+            lines += _table(["split", "negatives", "flagged ambiguous", "clean", "flagged rate",
+                             "with gold-doc signals (informational)"],
+                            [[split, b["negatives"], b["flagged"], b["clean"], b["flagged_rate"],
+                              b["gold_doc_signal_negatives"]]
+                             for split, b in sorted(per_split.items())])
+        lines += ["", f"Signal counts (distractor docs only): "
+                  f"`{negative_summary.get('signal_counts')}`. Informational gold-doc signal "
+                  f"counts (never ambiguity): `{negative_summary.get('gold_doc_signal_counts')}`.",
+                  "",
+                  "Policy (spec §6): a negative flagged `ambiguous_negative` stays in the dataset "
+                  "but the primary RL trainer skips flagged TRAIN negatives from reward-bearing "
+                  "updates; `val_strict`/`test_strict` keep their flags so clean vs ambiguous "
+                  "negatives can be compared. The flag is automated-heuristic only — no human "
+                  "review was performed — and is carried per row in "
+                  "`questions_*.parquet.ambiguous_negative`, per scenario in "
+                  "`difficulty.ambiguous_negative`, and listed in "
+                  "`data/processed/ambiguous_negatives.json`. Flagged counts are reported here "
+                  "and not hidden.", ""]
     if notes:
         lines += ["## Notes and honest limitations", ""]
         lines += [f"- {n}" for n in notes] + [""]

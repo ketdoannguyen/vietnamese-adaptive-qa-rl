@@ -10,7 +10,10 @@ deliberately contains:
 * a positive whose answer occurs exactly once but at a different offset
   (recoverable, unique-match rule);
 * a positive whose answer text is absent from the context (unrecoverable);
-* impossible (negative) rows with ``plausible_answers``;
+* impossible (negative) rows with ``plausible_answers`` — including one whose plausible
+  answer (``5``: "Nguyễn Du") occurs in no document at all and one whose plausible answer
+  (``65``: "bốn") occurs in a *sibling* document of the same title (``60``), the two sides
+  of the distractor-only negative-ambiguity audit (spec §6);
 * an answerable row with ``answers=None`` (malformed) and a row with an empty question;
 * an NFD + double-space context (display mapping must keep offsets valid);
 * two titles that share the *same* context document (split isolation must not break);

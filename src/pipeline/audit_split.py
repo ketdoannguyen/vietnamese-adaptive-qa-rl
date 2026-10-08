@@ -8,9 +8,11 @@ the profile cap, builds one episodic scenario per question and writes:
 
 * ``data/processed/questions_{train,val,test}_strict.parquet``  (label store — private)
 * ``data/processed/docs_{train,val,test}_strict.parquet``       (content only)
-* ``data/processed/scenarios_{train,val,test}.jsonl``
 * ``data/processed/qids_{split}_strict.txt``
 * ``data/processed/split_manifest.json``
+* ``data/processed/ambiguous_negatives.json``
+* ``data/scenarios/scenarios_{train,val,test}.jsonl``           (``cfg['paths']['data_scenarios']``,
+  the layout :mod:`src.data.artifacts` — the supported reader — expects)
 * ``data/diagnostics/{schema_report.md,leakage_report.json,negative_audit.csv,
   exclusions.csv,doc_sha256.csv}``
 
@@ -52,6 +54,7 @@ QUESTIONS_SCHEMA = pa.schema([
     ("answer_starts_display", pa.list_(pa.int64())), ("answer_texts_display", pa.list_(pa.string())),
     ("is_impossible", pa.bool_()), ("plausible_texts", pa.list_(pa.string())),
     ("gold_doc_id", pa.string()), ("offset_issue", pa.string()), ("notes", pa.string()),
+    ("ambiguous_negative", pa.bool_()),
 ])
 
 DOCS_SCHEMA = pa.schema([
@@ -103,8 +106,13 @@ def normalize_raw_split(path: str | Path, split: str, *, keep_rows: bool):
     return rows, stats, qids, failures
 
 
-def question_row(row: NormalizedRow, strict_split: str) -> dict[str, Any]:
-    """Label-bearing row for the label store parquet (never an observation)."""
+def question_row(row: NormalizedRow, strict_split: str,
+                 ambiguous_negative: bool = False) -> dict[str, Any]:
+    """Label-bearing row for the label store parquet (never an observation).
+
+    ``ambiguous_negative`` is the automated distractor-ambiguity flag (spec §6); it is
+    always ``False`` for answerable rows and never true for a row that was not evaluated.
+    """
     private = row.question.private
     return {
         "qid": row.question.qid,
@@ -121,6 +129,7 @@ def question_row(row: NormalizedRow, strict_split: str) -> dict[str, Any]:
         "gold_doc_id": private.gold_doc_id,
         "offset_issue": private.offset_issue,
         "notes": ";".join(row.notes),
+        "ambiguous_negative": False if not private.is_impossible else bool(ambiguous_negative),
     }
 
 
@@ -167,7 +176,8 @@ def run(
     processed_dir = Path(processed_dir if processed_dir is not None else resolve(cfg, "data_processed"))
     diagnostics_dir = Path(diagnostics_dir if diagnostics_dir is not None
                            else resolve(cfg, "data_diagnostics"))
-    for directory in (processed_dir, diagnostics_dir):
+    scenarios_dir = resolve(cfg, "data_scenarios")
+    for directory in (processed_dir, diagnostics_dir, scenarios_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     run_id = f"p1-audit-split-{profile}-{now_iso().replace(':', '')}"
@@ -341,8 +351,14 @@ def run(
                        for row in selected[name]}
         docs_by_id = {doc_id: doc for name in splitter.STRICT_SPLITS
                       for doc_id, doc in docs_selected[name].items()}
-        audit_rows, audit_summary = auditor.audit_negatives(
+        audit_rows, audit_summary, ambiguous_flags = auditor.audit_negatives(
             all_scenarios, rows_by_qid, docs_by_id, size=audit_size, seed=split_seed)
+        # Data hygiene applied identically to all splits (never tuned on test_strict): the
+        # flag travels with every scenario so downstream stages cannot miss it. Scenario
+        # dataclasses are frozen but `difficulty` is a plain dict; this is the one place it
+        # is completed, and it happens before anything is written.
+        for scenario in all_scenarios:
+            scenario.difficulty["ambiguous_negative"] = ambiguous_flags.get(scenario.qid, False)
 
         # ---- 7. artifacts ----
         artifacts: dict[str, dict[str, Any]] = {}
@@ -356,11 +372,12 @@ def run(
             strict_name = f"{name}_strict"
             q_path = processed_dir / f"questions_{name}_strict.parquet"
             d_path = processed_dir / f"docs_{name}_strict.parquet"
-            s_path = processed_dir / f"scenarios_{name}.jsonl"
+            s_path = scenarios_dir / f"scenarios_{name}.jsonl"
             qid_path = processed_dir / f"qids_{name}_strict.txt"
             record(f"questions_{strict_name}",
-                   write_parquet([question_row(r, strict_name) for r in selected[name]],
-                                 q_path, QUESTIONS_SCHEMA), q_path)
+                   write_parquet(
+                       [question_row(r, strict_name, ambiguous_flags.get(r.question.qid, False))
+                        for r in selected[name]], q_path, QUESTIONS_SCHEMA), q_path)
             record(f"docs_{strict_name}",
                    write_parquet([doc_row(docs_selected[name][d], docs_raw_selected[name][d],
                                           strict_name) for d in sorted(docs_selected[name])],
@@ -382,6 +399,26 @@ def run(
         auditor.write_csv(negative_path, audit_rows,
                           ["qid", "split", "docs", "verdict", "ambiguous_flag", "reviewer_note"])
         written.append(negative_path)
+        # Machine-readable flag list: the RL trainer reads this to skip flagged TRAIN
+        # negatives from reward-bearing updates in the primary analysis (spec §6), while
+        # val_strict/test_strict keep their flags for clean-vs-ambiguous reporting.
+        ambiguous_path = processed_dir / "ambiguous_negatives.json"
+        atomic_write_json(ambiguous_path, {
+            "method": audit_summary["method"],
+            "generated_by": f"python -m src.pipeline.audit_split --profile {profile} ({run_id})",
+            "splits": {
+                f"{name}_strict": {
+                    "flagged_qids": sorted(
+                        s.qid for s in scenarios_by_split[name]
+                        if s.difficulty.get("ambiguous_negative")),
+                    "counts": dict(audit_summary["per_split"].get(
+                        f"{name}_strict",
+                        {"negatives": 0, "flagged": 0, "clean": 0, "flagged_rate": None,
+                         "gold_doc_signal_negatives": 0})),
+                } for name in splitter.STRICT_SPLITS},
+            "note": "automated heuristic only; no human review",
+        })
+        written.append(ambiguous_path)
         doc_sha_path = diagnostics_dir / "doc_sha256.csv"
         auditor.write_csv(doc_sha_path, auditor.doc_sha_rows(full_docs),
                           ["doc_id", "source_split", "strict_split", "title_group", "n_chars"])
@@ -425,6 +462,8 @@ def run(
             stats_for_report[f"strict:{name}_strict"] = strict_stats[name].to_dict()
 
         test_stats = raw_stats["test"].to_dict()
+        flagged_by_split = {split: b["flagged"]
+                            for split, b in sorted(audit_summary["per_split"].items())}
         notes = [
             f"Strict splits are built from the raw `train` split only "
             f"({raw_stats['train'].rows} rows). Raw `validation` and `test` are never used "
@@ -452,9 +491,21 @@ def run(
             f"a logged reason in `data/diagnostics/exclusions.csv` (never silently repaired or "
             f"dropped): {len(scenario_exclusions)} scenario-stage exclusions, "
             f"{len(exclusions)} exclusions in total.",
-            f"Negative audit: {audit_summary['audited']} cases reviewed with automated lexical "
-            f"heuristics ({audit_summary['ambiguous']} flagged `ambiguous`); NO human review was "
-            f"performed — the CSV says so in every note.",
+            f"Negative audit (automated, distractor documents only): all "
+            f"{audit_summary['negatives_available']} negative scenarios were evaluated and "
+            f"{audit_summary['flagged_negatives_all']} are flagged `ambiguous_negative` "
+            f"(overall rate {audit_summary['flagged_rate_all']}); the CSV covers the "
+            f"deterministic sample of {audit_summary['audited']}. Signals on a question's own "
+            f"gold doc are expected for `is_impossible` rows (measured: "
+            f"{audit_summary['gold_doc_signal_negatives']} negatives carry such gold-doc "
+            f"signals) and are reported informationally, never counted as ambiguity. NO human "
+            f"review was performed — the CSV says so in every note.",
+            f"`ambiguous_negative` policy (spec §6): flagged train_strict negatives are skipped "
+            f"by the primary RL trainer for reward-bearing updates; flagged val_strict/"
+            f"test_strict negatives are kept for clean-vs-ambiguous comparison. Flagged per "
+            f"split: {flagged_by_split}; full list and counts in "
+            f"`data/processed/ambiguous_negatives.json`. The heuristic is applied identically "
+            f"to all splits and was judged on pilot-scale data — never tuned on test_strict.",
             f"`questions_*.parquet` is a LABEL STORE (gold answers, `is_impossible`, "
             f"`plausible_texts`, `gold_doc_id`). It must never be read into an observation or a "
             f"prompt; policies only ever see `QuestionRecord.public_view()` and "
@@ -555,6 +606,13 @@ def run(
                            for name in splitter.STRICT_SPLITS},
             },
             "negative_audit": audit_summary,
+            "ambiguous_negatives": {
+                "path": _rel(ambiguous_path),
+                "policy": ("primary analysis: flagged train_strict negatives are skipped by the "
+                           "RL trainer for reward-bearing updates; val_strict/test_strict keep "
+                           "them so clean vs ambiguous negatives can be compared (spec §6)"),
+                "human_review": False,
+            },
             "exclusions": {
                 "total": len(exclusions),
                 "scenario_stage": len(scenario_exclusions),

@@ -167,6 +167,10 @@ def run(
     split_seed = int(data["split_seed"])
     scenario_seed = int(data["scenario_seed"])
     n_distractors = int(data["n_distractors"])
+    hard_negative_ratio = float(data.get("hard_negative_ratio", 0.0))
+    retrieval_bm25 = (cfg.get("retrieval") or {}).get("bm25") or {}
+    bm25_k1 = float(retrieval_bm25.get("k1", 1.5))
+    bm25_b = float(retrieval_bm25.get("b", 0.75))
     audit_size = int(data["negative_audit_size"])
     train_ratio = float(data["strict_train_ratio"])
     val_ratio = float(data["strict_val_ratio"])
@@ -184,7 +188,7 @@ def run(
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
     registry.append(run_id=run_id, stage="P1_audit_split", status="RUNNING", profile=profile,
                     cap_per_split=cap, split_seed=split_seed, scenario_seed=scenario_seed,
-                    n_distractors=n_distractors)
+                    n_distractors=n_distractors, hard_negative_ratio=hard_negative_ratio)
     written: list[Path] = []
     try:
         source = loader.load_source_manifest(raw_dir)
@@ -272,7 +276,8 @@ def run(
         for name in splitter.STRICT_SPLITS:
             scenarios, excl = scenario_mod.build_scenarios(
                 selected[name], docs_selected[name], split=f"{name}_strict",
-                n_distractors=n_distractors, scenario_seed=scenario_seed)
+                n_distractors=n_distractors, scenario_seed=scenario_seed,
+                hard_negative_ratio=hard_negative_ratio, bm25_k1=bm25_k1, bm25_b=bm25_b)
             scenarios_by_split[name] = scenarios
             scenario_exclusions.extend(excl)
         exclusions.extend(scenario_exclusions)
@@ -543,6 +548,7 @@ def run(
                 "scenario seed": scenario_seed,
                 "scenario version": scenario_mod.SCENARIO_VERSION,
                 "n distractors per scenario": n_distractors,
+                "hard-negative ratio (reference BM25, other-title)": hard_negative_ratio,
                 "merge near-dup cosine": MERGE_NEAR_DUP_THRESHOLD,
                 "report near-dup cosine": REPORT_NEAR_DUP_THRESHOLD,
                 "generated (UTC)": now_iso(),
@@ -602,6 +608,8 @@ def run(
                 "version": scenario_mod.SCENARIO_VERSION,
                 "scenario_seed": scenario_seed,
                 "n_distractors": n_distractors,
+                "hard_negative_ratio": hard_negative_ratio,
+                "hard_negative_reference": {"tool": "bm25", "k1": bm25_k1, "b": bm25_b},
                 "splits": {f"{name}_strict": scenario_mod.scenario_summary(scenarios_by_split[name])
                            for name in splitter.STRICT_SPLITS},
             },

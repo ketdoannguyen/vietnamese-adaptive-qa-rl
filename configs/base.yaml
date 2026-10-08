@@ -34,6 +34,9 @@ data:
   strict_val_ratio: 0.15
   # remainder -> test_strict
   n_distractors: 12
+  # fraction of distractor slots filled with BM25-hard negatives (spec 02 §6): the
+  # other-title pool documents the reference BM25 ranks highest for the question text;
+  # the rest are uniform draws. 0.0 reproduces the random-only v1 corpora.
   hard_negative_ratio: 0.5
   scenario_seed: 42
   negative_audit_size: 150

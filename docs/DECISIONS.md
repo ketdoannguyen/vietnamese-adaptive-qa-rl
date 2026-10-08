@@ -418,3 +418,59 @@ changed corpus is re-ranked; unchanged ones stay cache hits; rows carry `corpus_
 `test_cache_reader_refuses_a_ranking_outside_the_corpus` (build fails with the D011 message),
 `test_a_state_cache_over_changed_sources_is_refused` (one appended byte to the rankings file
 makes world-building refuse the cache). Full suite green after the fix.
+
+## D012 — P1 corpora: hard negatives were configured but never implemented (v2, 2026-10-08)
+
+**Finding (measured, not assumed).** After the D011 rebuild, the teacher's action
+distribution looked degenerate: SEARCH_BM25=19, SEARCH_DENSE=10 of 34,993 train states
+(ANSWER=10,913, ABSTAIN=24,051). The oracle was verified *correct*, not buggy: at the root
+the bootstrap reveals `bm25[0]`, and episode `recall@1` is bm25 0.979 / dense 0.986 over the
+13-doc corpora — for 1,563 of 4,999 train questions the gold document's candidate is already
+correct at the root, and only 20 questions have a correct candidate reachable *exclusively*
+through a search. Root labels decompose exactly: ABSTAIN 3,416 = 1,470 impossible + 1,946
+answerable-without-any-correct-candidate; ANSWER 1,563; SEARCH 20; total 4,999. The corpora
+were too easy, exactly the failure the spec predicts: "Nếu agent never SEARCH => bootstrap quá dễ
+hoặc search reward/cost không cân đối" (`05_SEQUENTIAL_REINFORCE_TRAINING.md` §11).
+
+**Defect.** `configs/base.yaml` has carried `data.hard_negative_ratio: 0.5` since the P1
+commit, but `build_scenarios` never read it: 100% of distractors were uniform draws. Spec
+`02_BM25_DENSE_RETRIEVAL.md` §6 requires the mix — "Nếu 8 distractors random quá dễ, tạo
+`hard_distractors` chọn các đoạn có BM25/E5 similarity gần câu hỏi nhưng khác title ...
+Trộn 50% random + 50% hard ... Record hardness distribution và phân tích curriculum" —
+and "không dùng gold answer hoặc test performance để chọn".
+
+**Fix (P1, D012).**
+1. *Hard slots are question-side BM25 picks.* `build_scenarios` builds one reference
+   `BM25Index` per split pool (the same `tokenize_vi` and `k1`/`b` as the P2 stage, passed
+   from `cfg["retrieval"]["bm25"]`) and fills `round(hard_negative_ratio × n_distractors)`
+   slots with the highest-scoring **other-title** pool documents for the *question text*.
+   The gold answer, gold document identity (beyond the title exclusion) and test splits are
+   never read for selection; the audit (`auditor.negative_signals`) already inspects every
+   corpus document per negative, so hard distractors are false-negative-audited
+   automatically.
+2. *BM25-only, by decision.* The bootstrap tool is BM25, so bm25-hard negatives target the
+   measured bottleneck; a reference E5 index would pull a GPU model into the deterministic
+   data stage for no bearing on the root decision. Dense-side behavior stays an environment
+   property to *measure* after the rebuild (dense `recall@1` may remain high — then
+   SEARCH_DENSE is legitimately the valuable tool when BM25 top-1 is a hard distractor).
+3. *Provenance.* `SCENARIO_VERSION = 2`; every scenario id and the RNG seed change
+   (`stable_seed(qid, scenario_seed, version)`), so no cache can silently mix v1/v2 rows.
+   `difficulty` records `n_distractors_hard`/`n_distractors_random`/`hard_mean_score`;
+   `scenario_summary` aggregates the hardness distribution into the split manifest; the P1
+   report and registry row record the ratio and the reference BM25 parameters.
+4. *v1 is the `hard_negative_ratio=0.0` special case.* Verified at dev time against the
+   pre-D012 module loaded from git: on the tiny fixture, ratio 0.0 + version 1 reproduces
+   all three splits' corpora **bit-identically** (the RNG call sequence is unchanged).
+
+**Rebuild chain.** P1 audit_split (v2 corpora, all splits) → P2 build_retrieval (all rows
+re-ranked; corpus fingerprints changed) → P3 cache_reader → P3 train_reader `--reselect`
+(val retrieved-context metrics and threshold depend on val corpora) → P5 make_teacher →
+Laya CE/RLCD → P6/P7/P9. Acceptance signals to re-measure after rebuild: episode `recall@1`
+(must drop from 0.979), questions with a deeper-only correct candidate (was 20/4,999),
+SEARCH share of teacher labels (was 0.08%), and the audit's flagged-negative rate.
+
+**Tests.** `tests/test_scenarios.py`: hard slots equal the independently computed top
+BM25 other-title picks; the 0.5/1.0/0.0 ratios place the expected hard/random counts; corpora
+are deterministic for a fixed pool/seed/version; changing the gold *answer* leaves the
+corpus byte-identical (no label leak); the summary records the hardness distribution. Full
+suite green (341 passed, 1 skipped).

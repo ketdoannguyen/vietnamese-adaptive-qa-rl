@@ -21,8 +21,20 @@ from typing import Iterable, Mapping, Sequence
 
 from src.retrieval.bm25 import BM25Index
 from src.retrieval.dense import DenseBank, DenseEncoder, rank_by_inner_product
+from src.utils.hashing import sha256_json
 
 TOOLS = ("bm25", "dense")
+
+
+def scenario_corpus_sha(corpus_doc_ids: Sequence[str]) -> str:
+    """Fingerprint of one scenario's episode corpus (order included).
+
+    A ``scenario_id`` is ``sc:<split>:<qid>:v<version>`` — it does not capture the corpus,
+    and the corpus is not identical across profiles: distractor sampling draws from the
+    capped split's document pool, so the same qid gets different distractors at different
+    caps (D011). Cached rankings are reused only while this fingerprint matches.
+    """
+    return sha256_json(list(corpus_doc_ids))
 
 
 @dataclass
@@ -33,6 +45,8 @@ class ScenarioRanking:
     qid: str
     rankings: dict[str, list[str]] = field(default_factory=dict)
     scores: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: Fingerprint of the corpus this ranking was built over; see :func:`scenario_corpus_sha`.
+    corpus_sha: str = ""
 
     def ranked(self, tool: str) -> list[str]:
         if tool not in self.rankings:
@@ -45,13 +59,14 @@ class ScenarioRanking:
     def to_row(self) -> dict:
         return {"scenario_id": self.scenario_id, "qid": self.qid,
                 "rankings": {t: list(v) for t, v in self.rankings.items()},
-                "scores": self.scores}
+                "scores": self.scores, "corpus_sha": self.corpus_sha}
 
     @classmethod
     def from_row(cls, row: Mapping) -> "ScenarioRanking":
         return cls(scenario_id=row["scenario_id"], qid=row["qid"],
                    rankings={t: list(v) for t, v in row["rankings"].items()},
-                   scores={t: dict(v) for t, v in row["scores"].items()})
+                   scores={t: dict(v) for t, v in row["scores"].items()},
+                   corpus_sha=row.get("corpus_sha", ""))
 
 
 def rank_scenario(*, scenario_id: str, qid: str, question: str,
@@ -87,6 +102,7 @@ def rank_scenario(*, scenario_id: str, qid: str, question: str,
                   "dense": [d for d, _ in dense_pairs]},
         scores={"bm25": {d: s for d, s in bm25_pairs},
                 "dense": {d: s for d, s in dense_pairs}},
+        corpus_sha=scenario_corpus_sha(corpus),
     )
 
 

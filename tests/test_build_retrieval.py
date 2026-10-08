@@ -8,6 +8,7 @@ a GPU or a model download.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -129,6 +130,30 @@ def test_changing_the_retrieval_config_invalidates_cached_rows(cfg):
     _run(cfg)
     cfg["retrieval"]["bm25"]["k1"] = 1.2
     assert _run(cfg)["splits"][SPLIT]["ranked"] == 3
+
+
+def test_a_cached_row_for_a_changed_corpus_is_rebuilt(cfg):
+    """D011: the same scenario_id can get a different corpus at a different profile cap.
+
+    A cached ranking is reused only while its corpus fingerprint matches; for the changed
+    scenario the old row (no fingerprint) must be re-ranked over the new corpus.
+    """
+    _run(cfg)
+    rows = list(read_jsonl(br.rankings_path(cfg, SPLIT)))
+    assert all(row["corpus_sha"] for row in rows)
+
+    scenarios_path = artifacts.scenarios_path(Path(cfg["paths"]["data_scenarios"]), SPLIT)
+    scenarios = list(read_jsonl(scenarios_path))
+    changed = scenarios[0]
+    changed["corpus_doc_ids"] = ["doc_hanoi", "doc_hcm", "doc_river"]
+    write_jsonl(scenarios_path, scenarios)
+
+    second = _run(cfg)
+    assert second["splits"][SPLIT] == {"cache_hits": 2, "ranked": 1, "scenarios": 3}
+    rebuilt = {row["scenario_id"]: row for row in read_jsonl(br.rankings_path(cfg, SPLIT))}
+    assert rebuilt[changed["scenario_id"]]["corpus_sha"] != \
+        next(r for r in rows if r["scenario_id"] == changed["scenario_id"])["corpus_sha"]
+    assert "doc_river" in rebuilt[changed["scenario_id"]]["rankings"]["bm25"]
 
 
 def test_force_rebuilds_the_dense_bank(cfg):

@@ -30,7 +30,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from src.data import artifacts
 from src.data.schemas import ScenarioRecord
 from src.retrieval.dense import DenseBank, DenseEncoder
-from src.retrieval.engine import ScenarioRanking, rank_scenario
+from src.retrieval.engine import ScenarioRanking, rank_scenario, scenario_corpus_sha
 from src.retrieval.rankings import differing_examples, summarise_retrieval
 from src.utils.config import add_profile_args, config_from_args, resolve, snapshot_config
 from src.utils.hashing import sha256_json
@@ -215,7 +215,12 @@ def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Ma
     top_n = int(ret["bm25"]["top_n_cached"])
     path = rankings_path(cfg, split)
     rows = _reusable_rows(path, cfg=cfg, force=force)
-    todo = [s for s in scenarios if s.scenario_id not in rows]
+    # A row is reusable only for the corpus it was built over (D011): the same scenario_id
+    # gets different distractors at different profile caps, so an id match alone can serve
+    # a ranking of a different corpus. Older rows without the fingerprint are rebuilt.
+    todo = [s for s in scenarios
+            if rows.get(s.scenario_id, {}).get("corpus_sha")
+            != scenario_corpus_sha(list(s.corpus_doc_ids))]
     if todo and cache_only:
         raise FileNotFoundError(
             f"--cache-only but {len(todo)} of {len(scenarios)} {split} scenarios have no cached "

@@ -61,6 +61,9 @@ def build_state_cache(*, scenarios: Sequence[Any], questions: Mapping[str, str],
     ``inference`` is a :class:`src.qa.infer.ReaderInference` (duck-typed: ``predict(pairs)``).
     A scenario without a ranking is skipped and reported; a document referenced by a ranking
     but absent from ``docs`` is skipped and reported — never silently answered from nothing.
+    A ranking that references a document outside the scenario's own corpus raises: such a row
+    is stale (built for a different corpus, D011) and the states it would produce are ones
+    the environment must refuse, so the cache is never built from it.
     """
     by_qid: dict[str, Any] = {}
     states_by_qid: dict[str, list[tuple[str, ...]]] = {}
@@ -72,6 +75,15 @@ def build_state_cache(*, scenarios: Sequence[Any], questions: Mapping[str, str],
         if not ranking:
             missing_ranking.append(qid)
             continue
+        corpus = set(scenario.corpus_doc_ids)
+        for tool, ranked in ranking.items():
+            outside = [doc_id for doc_id in ranked if doc_id not in corpus]
+            if outside:
+                raise ValueError(
+                    f"{scenario.scenario_id}: ranking for tool {tool!r} references "
+                    f"{len(outside)} doc(s) outside the episode corpus, e.g. {outside[0]!r} "
+                    "— the P2 ranking cache is stale for this scenario; rerun build_retrieval "
+                    "(D011)")
         states_by_qid[qid] = reachable_states(
             ranking, bootstrap_tool=retrieval["initial_bootstrap"],
             bootstrap_passages=int(retrieval["bootstrap_passages"]),

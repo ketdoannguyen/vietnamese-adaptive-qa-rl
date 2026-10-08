@@ -40,6 +40,7 @@ from src.decision.laya_adapter import LayaAdapter
 from src.decision.laya_cache import LayaProbCache
 from src.decision.state_text import serialize_state, state_hash
 from src.pipeline import build_retrieval
+from src.pipeline import cache_reader
 from src.pipeline.cache_reader import state_cache_paths
 from src.qa.reader import ReaderCache, ReaderPrediction
 from src.qa.state_cache import load_state_cache, load_state_cache_meta, state_cache_key
@@ -313,6 +314,7 @@ def build_worlds(cfg: Mapping[str, Any], split: str, *, limit: int | None = None
     reader_cache = load_state_cache(state_cache_paths(cfg, split)[0])
     config = env_config(cfg)
     _check_state_cache_budget(meta, config)
+    _check_state_cache_sources(cfg, split, meta)
 
     worlds: list[EpisodeWorld] = []
     for scenario in scenarios:
@@ -381,6 +383,25 @@ def _check_state_cache_budget(meta: Mapping[str, Any], config: EnvConfig) -> Non
             f"({budget}), the environment would run {expected} with "
             f"max_optional_search={config.max_optional_search}; rebuild the cache "
             "(cache_reader) instead of rolling out states it does not cover")
+
+
+def _check_state_cache_sources(cfg: Mapping[str, Any], split: str,
+                               meta: Mapping[str, Any]) -> None:
+    """The cache is only valid for the exact inputs it recorded (D011).
+
+    The cache records the sha256 of the rankings/docs/questions/scenarios it was built from;
+    a file that changed since (e.g. rankings rebuilt after the D011 fix) makes every cached
+    state stale, and rolling out a stale state would show the agent evidence from the wrong
+    corpus. Fail fast instead.
+    """
+    recorded = meta.get("sources") or {}
+    current = cache_reader.source_checksums(cfg, split)
+    drifted = [name for name in sorted(current)
+               if (recorded.get(name) or {}).get("sha256") != current[name]["sha256"]]
+    if drifted:
+        raise ValueError(
+            f"the P3 state cache for {split} is stale: {', '.join(drifted)} changed since "
+            "it was built; rerun cache_reader (P3) before building worlds")
 
 
 def _private(scenario: Any, gold_row: Mapping[str, Any],

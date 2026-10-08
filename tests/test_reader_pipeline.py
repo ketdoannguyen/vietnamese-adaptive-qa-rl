@@ -583,6 +583,20 @@ def test_cache_reader_reports_questions_without_a_ranking(cfg, monkeypatch):
     assert summary["splits"]["val_strict"]["n_missing_ranking"] == VAL_N - 1
 
 
+def test_cache_reader_refuses_a_ranking_outside_the_corpus(cfg, monkeypatch):
+    """D011: a stale ranking row (built for another corpus) must fail the cache build."""
+    _write_contract(cfg)
+    monkeypatch.setattr(cache_reader, "ReaderInference", _StubInference)
+    _write_rankings(cfg, "train_strict", TRAIN_N)
+    path = train_reader.rankings_path(cfg, "train_strict")
+    rows = list(read_jsonl(path))
+    rows[0]["rankings"]["bm25"].append("doc:absent:999")
+    write_jsonl(path, rows)
+    with pytest.raises(ValueError, match="outside the episode corpus"):
+        cache_reader.run(cfg=cfg, profile="smoke", splits=("train_strict",),
+                         registry=_registry(cfg))
+
+
 def test_best_state_prediction_prefers_a_survivor(cfg):
     from src.qa.reader import NULL_PREDICTION, ReaderPrediction
 

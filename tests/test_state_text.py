@@ -14,7 +14,7 @@ import pytest
 
 from src.decision import state_text
 from src.decision.schema import ACTION_ORDER
-from src.pipeline import worlds
+from src.pipeline import build_retrieval, worlds
 from src.rl.env import ANSWER, SEARCH_BM25, SEARCH_DENSE, AdaptiveQAEnv
 from src.rl.reward import RewardCalculator, RewardConfig
 from src.utils.hashing import sha256_text
@@ -133,3 +133,14 @@ def test_answer_action_renders_as_history(env):
     obs, _, terminated, _, _ = env.step(ANSWER)
     assert terminated
     assert "Hành động đã thực hiện: ANSWER" in state_text.serialize_state(obs)
+
+
+def test_a_state_cache_over_changed_sources_is_refused(tmp_path):
+    """D011: worlds must refuse a cache whose recorded inputs changed since it was built."""
+    cfg = fx.p5_config(tmp_path)
+    fx.write_all(cfg, n_train=2, n_val=1)
+    rankings = build_retrieval.rankings_path(cfg, "train_strict")
+    with rankings.open("a", encoding="utf-8") as handle:
+        handle.write("\n")  # any byte-level change must be detected
+    with pytest.raises(ValueError, match="stale.*rankings changed.*rerun cache_reader"):
+        worlds.build_worlds(cfg, "train_strict", laya_regime=None)

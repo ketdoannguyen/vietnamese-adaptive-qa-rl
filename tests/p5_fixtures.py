@@ -25,7 +25,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from src.data import artifacts
-from src.pipeline import build_retrieval, train_reader
+from src.pipeline import build_retrieval, cache_reader, train_reader
 from src.qa import state_cache
 from src.qa.postprocess import NO_SPAN_SCORE, BestSpan
 from src.utils.config import load_config
@@ -157,6 +157,9 @@ def write_split(cfg: Mapping[str, Any], split: str, n: int) -> dict[str, Any]:
             "bootstrap_passages": int(cfg["retrieval"]["bootstrap_passages"]),
             "passage_per_search_action": int(cfg["retrieval"]["passage_per_search_action"]),
             "optional_searches": int(cfg["retrieval"]["optional_searches"])},
+        # Recorded the way the real cache_reader records them (D011): build_worlds refuses
+        # a cache whose sources changed since it was built.
+        "sources": cache_reader.source_checksums(cfg, split),
         "stats": stats,
     }
     atomic_write_json(meta_path, meta)

@@ -68,7 +68,8 @@ def load_rankings(cfg: Mapping[str, Any], split: str) -> dict[str, dict[str, lis
     return rankings
 
 
-def _source_checksums(cfg: Mapping[str, Any], split: str) -> dict[str, dict[str, Any]]:
+def source_checksums(cfg: Mapping[str, Any], split: str) -> dict[str, dict[str, Any]]:
+    """The exact inputs a state cache for ``split`` was built from, with their hashes."""
     processed = resolve(cfg, "data_processed")
     paths = {
         "rankings": train_reader.rankings_path(cfg, split),
@@ -123,7 +124,7 @@ def build_split_cache(cfg: Mapping[str, Any], split: str, *, profile: str, limit
             "passage_per_search_action": int(retrieval["passage_per_search_action"]),
             "optional_searches": int(retrieval["optional_searches"]),
         },
-        "sources": _source_checksums(cfg, split),
+        "sources": source_checksums(cfg, split),
         "parquet": {"path": str(parquet_path), **parquet_meta},
         "creation_script_sha": sha256_file(Path(__file__)),
         "library_versions": capture_library_versions(),

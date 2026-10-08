@@ -369,3 +369,52 @@ the higher D008 sum (built from the real medium rows at -4.5 and 0.5); ties brea
 while weights and `training_args.json` stay byte-identical, refusing cleanly without a frozen
 reader. Full command: `pytest tests/test_reader.py tests/test_reader_pipeline.py
 tests/test_correctness.py tests/test_baselines.py -q`: 72 passed.
+
+## D011 — Retrieval cache: a scenario_id does not identify a corpus (2026-10-08)
+
+**Defect.** The P2 ranking cache (`data/cache/retrieval/{split}_rankings_v1.jsonl`) reuses a
+row when `scenario_id` matches and `retrieval_config_sha` is unchanged. Neither captures the
+episode corpus: scenario sampling draws distractors from the *capped split's* document pool
+(`src/data/scenarios.py` samples from `sorted(docs_by_id)`; the pool is the docs of the
+capped rows, and `cap_rows` is a stratified subsample). So the same `qid` — hence the same
+`scenario_id` — receives different distractors at different profile caps, while the retrieval
+config hash (BM25/dense params only, `build_retrieval.retrieval_config_sha`) cannot see the
+difference. The pilot's 300 rows were therefore served unchanged to the medium run. Measured
+on the medium train cache: **300 of 4,999 rows have 12 of their 13 ranked documents outside
+their scenario's corpus** (same on val: 300/4,399; the count equals the pilot cap, one row
+per pilot scenario). The environment refused world-building — the first strict consumer —
+with `ranking for tool 'bm25' references 12 doc(s) outside the episode corpus`, which is how
+the defect surfaced; nothing had validated this invariant at the cache boundary.
+
+**Blast radius (what had consumed the stale rows).** The poisoned cache was *quiet* for every
+consumer that never checks corpus membership: the P3 state cache built at 16:07 was built
+over it (states with out-of-corpus docs for the 300 questions), and the P3 medium reader's
+retrieved-context val metrics / threshold selection had used it earlier. The oracle-context
+reader metrics were unaffected.
+
+**Fix (three guards, all at cache boundaries).**
+1. *Fingerprint the corpus in the row.* `engine.scenario_corpus_sha(corpus_doc_ids)` is
+   stored as `corpus_sha` in every ranking row (`to_row`/`from_row`), and `build_split`
+   re-ranks any scenario whose row fingerprint differs — including every pre-fix row, which
+   lacks the field, so the fix self-heals the existing cache. Rows for unchanged corpora are
+   still reused across profiles (that reuse was the feature; only its key was wrong).
+2. *Refuse to build a state cache from a ranking that steps outside the corpus.*
+   `build_state_cache` raises with the scenario_id, tool and first offending doc instead of
+   emitting states the environment must later reject.
+3. *Refuse to roll out a stale state cache.* `worlds.build_worlds` compares the cache meta's
+   recorded `sources` hashes (rankings/docs/questions/scenarios) against the current files
+   and fails fast on any drift. `cache_reader._source_checksums` became public
+   (`source_checksums`) and the P5 test fixture writes the block the way the real stage does.
+
+**Rebuild chain (all re-run after this fix, in order).** P2 build_retrieval (re-ranks exactly
+the drifted rows per split) → P3 cache_reader (state cache over the corrected rankings) →
+P3 train_reader `--reselect` (the medium reader's val retrieved-context metrics and selected
+threshold were computed over 300 stale val rankings; the frozen weights are untouched, only
+threshold-dependent artifacts are rewritten) → P5 make_teacher (rebuilds; its fingerprint
+covers the rankings and state cache SHAs) → downstream P5/P6/P7 as they run.
+
+**Tests.** `test_a_cached_row_for_a_changed_corpus_is_rebuilt` (a same-id scenario with a
+changed corpus is re-ranked; unchanged ones stay cache hits; rows carry `corpus_sha`),
+`test_cache_reader_refuses_a_ranking_outside_the_corpus` (build fails with the D011 message),
+`test_a_state_cache_over_changed_sources_is_refused` (one appended byte to the rankings file
+makes world-building refuse the cache). Full suite green after the fix.

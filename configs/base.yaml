@@ -79,8 +79,11 @@ reader:
   warmup_ratio: 0.1
   fp16: true
   # SQuAD2-style postprocessing: answer is null when null_score - best_non_null > threshold
+  # Tuned on strict val only; this value is the fallback if the sweep is not run.
   null_score_diff_threshold: 0.0
+  threshold_sweep: {start: -8.0, stop: 8.0, step: 0.5}  # inclusive grid, val only
   max_answer_length: 30
+  inference_batch_size: 32  # reader inference (val eval + QA state cache)
 
 reward:
   correct_answer: 2.0

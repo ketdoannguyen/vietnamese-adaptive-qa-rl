@@ -12,9 +12,9 @@ import numpy as np
 import pytest
 
 from src.qa.features import build_feature_set, build_pair_features
-from src.qa.postprocess import (NO_SPAN_SCORE, apply_threshold, best_prediction_per_question,
-                                choose_best_threshold, decode_windows, selection_report,
-                                sweep_threshold)
+from src.qa.postprocess import (NO_SPAN_SCORE, acceptance_constraint_met, apply_threshold,
+                                best_prediction_per_question, choose_best_threshold,
+                                decode_windows, selection_report, sweep_threshold)
 from src.qa.reader import ReaderPrediction, verify_provenance
 from src.qa.reader_eval import evaluate_predictions, gold_index, threshold_grid
 from src.qa.train_reader import (load_tokenizer, overfit_smoke, reader_model_hash,
@@ -225,22 +225,33 @@ def test_sweep_marks_feasible_thresholds_and_selects_below_the_margin(tokenizer)
     features, metas = build_pair_features(
         QUESTION, CONTEXT, tokenizer, qid="a1", doc_id="d1", answer_texts=[ANSWER],
         answer_starts=[ANSWER_START], max_length=128, doc_stride=32)
-    contexts = {"d1": CONTEXT}
-    logits = _logits(len(metas[0].sequence_ids), start=features[0].start_position,
-                     end=features[0].end_position, span_score=2.0)
-    spans = decode_windows(metas, *logits, contexts)
-    gold = gold_index([{"qid": "a1", "answer_texts": [ANSWER], "is_impossible": False}])
+    _, neg_metas = build_pair_features(
+        "Ai là tổng thống Pháp?", "   ", tokenizer, qid="i1", doc_id="d2",
+        is_impossible=True, max_length=32, doc_stride=8)
+    contexts = {"d1": CONTEXT, "d2": "   "}
+    start, end = _logits(len(metas[0].sequence_ids), start=features[0].start_position,
+                         end=features[0].end_position, span_score=2.0)
+    spans = decode_windows(metas, start, end, contexts)
+    neg_n = len(neg_metas[0].sequence_ids)
+    spans.update(decode_windows(neg_metas,
+                                np.zeros((len(neg_metas), neg_n), dtype=np.float32),
+                                np.zeros((len(neg_metas), neg_n), dtype=np.float32), contexts))
+    gold = gold_index([{"qid": "a1", "answer_texts": [ANSWER], "is_impossible": False},
+                       {"qid": "i1", "answer_texts": [], "is_impossible": True}])
 
     sweep = sweep_threshold(spans, gold, threshold_grid(-4.0, 4.0, 0.5),
                             reader_model_hash="sha", context_by_doc=contexts,
                             evaluate=evaluate_predictions)
-    # The margin is -2: every threshold below it abstains, so only those are feasible.
+    # The answerable margin is -2 (below it nothing answers), while the negative pair has no
+    # usable span at all and is nulled at every threshold — so only constraint 1 can bind.
     assert [row["threshold"] for row in sweep if not row["acceptance_constraint_met"]] == \
         [-4.0, -3.5, -3.0, -2.5]
     assert all("selection_objective" in row for row in sweep)
     best = choose_best_threshold(sweep)
-    assert best["threshold"] == -2.0  # all feasible rows tie: the lower threshold wins
+    assert best["threshold"] == -2.0  # the feasible rows tie: the lower threshold wins
     assert best["em_overall"] == 1.0 and best["acceptance_constraint_met"] is True
+    assert best["selection_objective"] == pytest.approx(best["f1_overall"])
+    assert best["f1_overall"] == pytest.approx(1.0)
     assert sweep[0] == best  # sorted selection-first, so the artifact is self-explaining
 
 
@@ -255,16 +266,18 @@ def _synthetic_row(threshold: float, **overrides) -> dict:
 
 
 def test_null_spam_row_cannot_win_a_feasible_sweep():
-    """The pilot regression (D008): the all-null row had the best overall EM (0.29 > 0.01)."""
-    null_spam = _synthetic_row(-8.0)  # objective 1.0, but answers nothing
+    """The pilot regression (D008, kept under D010): no score advantage saves an all-null row."""
+    null_spam = _synthetic_row(-8.0, f1_overall=0.35, em_overall=0.35)  # best score, no spans
     answers = _synthetic_row(6.0, answered_answerable=63, answered_impossible=22,
-                             f1_answerable=0.10, no_answer_accuracy=0.069, em_overall=0.01)
+                             f1_answerable=0.10, no_answer_accuracy=0.069,
+                             f1_overall=0.20, em_overall=0.01)
     sweep = [null_spam, answers]  # deliberately unsorted: row order must not decide
 
     best = choose_best_threshold(sweep)
     assert best["threshold"] == 6.0 and best["f1_answerable"] == 0.10
 
     report = selection_report(sweep)
+    assert report["objective"] == "f1_overall"
     assert report["constraint_binding"] is True  # the objective alone would pick -8.0
     assert report["chosen_threshold"] == 6.0
     assert report["objective_only_threshold"] == -8.0
@@ -273,12 +286,58 @@ def test_null_spam_row_cannot_win_a_feasible_sweep():
 
 def test_selection_prefers_the_objective_when_the_constraint_does_not_bind():
     weak = _synthetic_row(4.0, answered_answerable=50, answered_impossible=25,
-                          f1_answerable=0.08, no_answer_accuracy=0.14)   # objective 0.22
+                          f1_overall=0.22, em_overall=0.20)   # feasible, lower f1_overall
     strong = _synthetic_row(6.0, answered_answerable=63, answered_impossible=22,
-                            f1_answerable=0.10, no_answer_accuracy=0.24)  # objective 0.34
+                            f1_overall=0.34, em_overall=0.30)  # feasible, higher f1_overall
     report = selection_report([weak, strong])
+    assert report["objective"] == "f1_overall"
     assert report["chosen_threshold"] == 6.0
+    assert report["chosen_objective"] == pytest.approx(0.34)
     assert report["constraint_binding"] is False
+
+
+def test_sweep_that_never_nulls_an_impossible_question_is_infeasible():
+    """D010 constraint 2: answering every negative is the other §8.6 degenerate extreme."""
+    sweep = [_synthetic_row(-4.0, answered_answerable=60, answered_impossible=29),
+             _synthetic_row(0.0, answered_answerable=71, answered_impossible=29)]
+    assert not any(acceptance_constraint_met(row) for row in sweep)
+    with pytest.raises(ValueError, match="no threshold"):
+        choose_best_threshold(sweep)
+
+
+def test_d010_prefers_overall_f1_over_an_abstention_heavy_row():
+    """The medium-reader failure that produced D010.
+
+    The abandoned D008 sum (``f1_answerable + no_answer_accuracy``) is ``1 + (f1_answerable -
+    false_answer_rate)``, so it peaks near abstention; the row that actually answers must win
+    on ``f1_overall`` instead. Rows are the real medium sweep rows at -4.5 (answers 41 of
+    3107 answerable questions, F1 0.010) and 0.5 (answers 2475; val: 3107 / 1292).
+    """
+    abstention = _synthetic_row(-4.5, n=4399, n_answerable=3107, n_impossible=1292,
+                                answered_answerable=41, answered_impossible=12,
+                                f1_answerable=0.010126, no_answer_accuracy=0.990712,
+                                f1_overall=0.298127, em_overall=0.296886)
+    answering = _synthetic_row(0.5, n=4399, n_answerable=3107, n_impossible=1292,
+                               answered_answerable=2475, answered_impossible=984,
+                               f1_answerable=0.475674, no_answer_accuracy=0.238390,
+                               f1_overall=0.405983, em_overall=0.274835)
+    assert acceptance_constraint_met(abstention) and acceptance_constraint_met(answering)
+    assert (abstention["f1_answerable"] + abstention["no_answer_accuracy"]
+            > answering["f1_answerable"] + answering["no_answer_accuracy"])
+
+    best = choose_best_threshold([abstention, answering])
+    assert best["threshold"] == 0.5
+    assert best["f1_overall"] == pytest.approx(0.405983)
+
+
+def test_selection_ties_break_on_em_then_lower_threshold():
+    base = {"answered_answerable": 50, "answered_impossible": 10, "f1_overall": 0.40}
+    higher_em = _synthetic_row(1.5, em_overall=0.31, **base)
+    assert choose_best_threshold([_synthetic_row(1.0, em_overall=0.30, **base),
+                                  higher_em])["threshold"] == 1.5
+    assert choose_best_threshold([higher_em,
+                                  _synthetic_row(0.5, em_overall=0.31, **base)])["threshold"] \
+        == 0.5
 
 
 def test_choose_best_threshold_fails_when_no_threshold_answers():

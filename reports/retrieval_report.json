@@ -1,0 +1,106 @@
+{
+  "n_scenarios": 13658,
+  "n_answerable": 9322,
+  "recall_at_1": {
+    "bm25": 0.9797253808195666,
+    "dense": 0.9861617678609741
+  },
+  "recall_at_3": {
+    "bm25": 0.9968890795966531,
+    "dense": 0.997961810770221
+  },
+  "recall_at_5": {
+    "bm25": 0.9990345419437889,
+    "dense": 0.9991418150611456
+  },
+  "mrr": {
+    "bm25": 0.988351665379127,
+    "dense": 0.9919885324573159
+  },
+  "union_recall_at_5": 0.9996781806479297,
+  "reachable_rate": {
+    "bm25": 0.9968890795966531,
+    "dense": 0.9951727097189444
+  },
+  "topk_overlap_bm25_dense": 0.42066188314536673,
+  "diff_rate": 0.9217308537121102,
+  "config_sha": "b4ca203442fd30b64c8b3255a9ccee060f38fcd8e9d5ffc37a0a2385ff6c3618",
+  "reach_budget": {
+    "bm25": 3,
+    "dense": 2
+  },
+  "cache_version": "v1",
+  "rankings_total": 13658,
+  "gold_rank_bm25_histogram": {
+    "1": 9133,
+    "2-3": 160,
+    "4-5": 20,
+    "6-10": 8,
+    ">10": 1,
+    "missing": 0
+  },
+  "gold_rank_dense_histogram": {
+    "1": 9193,
+    "2-3": 110,
+    "4-5": 11,
+    "6-10": 6,
+    ">10": 2,
+    "missing": 0
+  },
+  "unreachable_scenarios": 8,
+  "unreachable_rate": 0.0008581849388543231,
+  "unreachable_examples": [
+    "sc:train_strict:train:0020-0002-0002:v1",
+    "sc:train_strict:train:0020-0007-0003:v1",
+    "sc:train_strict:train:0116-0007-0001:v1",
+    "sc:train_strict:train:0117-0013-0005:v1",
+    "sc:val_strict:train:0053-0001-0003:v1",
+    "sc:test_strict:train:0002-0017-0002:v1",
+    "sc:test_strict:train:0002-0017-0003:v1",
+    "sc:test_strict:train:0087-0041-0002:v1"
+  ],
+  "library_versions": {
+    "python": "3.10.12",
+    "torch": "2.14.1+cu130",
+    "transformers": "5.19.0",
+    "datasets": "5.1.0",
+    "numpy": "2.2.6",
+    "sentence_transformers": "6.1.0",
+    "rank_bm25": "unknown",
+    "sklearn": "1.7.2",
+    "gymnasium": "1.4.0",
+    "pandas": "2.3.3",
+    "pyarrow": "25.0.1",
+    "cuda_runtime": "13.0",
+    "cudnn": 92400
+  },
+  "profile": "medium",
+  "splits": {
+    "train_strict": {
+      "cache_hits": 300,
+      "ranked": 4699,
+      "scenarios": 4999
+    },
+    "val_strict": {
+      "cache_hits": 300,
+      "ranked": 4099,
+      "scenarios": 4399
+    },
+    "test_strict": {
+      "cache_hits": 300,
+      "ranked": 3960,
+      "scenarios": 4260
+    }
+  },
+  "docs": 3223,
+  "dense_bank": {
+    "path": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/data/indexes/dense_intfloat__multilingual-e5-small.npz",
+    "docs": 3223,
+    "dim": 384,
+    "model": "intfloat/multilingual-e5-small",
+    "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+    "revision_source": "hub",
+    "rebuilt": true,
+    "config_sha": "b4ca203442fd30b64c8b3255a9ccee060f38fcd8e9d5ffc37a0a2385ff6c3618"
+  }
+}

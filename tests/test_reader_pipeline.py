@@ -135,10 +135,11 @@ def cfg(tmp_path, monkeypatch, tokenizer):
     conf["data"]["caps"]["smoke"] = None  # use every synthetic question
     conf["reader"].update({
         "fp16": False, "epochs": 1, "batch_size": 4, "grad_accum": 8, "warmup_ratio": 0.0,
-        # A single-point grid keeps the end-to-end run deterministic. A barely-trained tiny
-        # model has near-uniform logits (null margin ~0), so a threshold of +8 keeps every
-        # pair answered — which is what makes the decoded-span assertions stable.
-        "threshold_sweep": {"start": 8.0, "stop": 8.0, "step": 1.0}})
+        # A small grid around the tiny model's deterministic val null margins (they cluster
+        # just above -0.45) exercises the D010 selection end-to-end: -0.5 nulls every pair,
+        # failing the "answers something" constraint while owning the best raw f1_overall
+        # (the all-null row), so feasibility must overrule the objective and pick -0.4.
+        "threshold_sweep": {"start": -0.5, "stop": -0.4, "step": 0.1}})
     _write_split(conf, "train_strict", TRAIN_N)
     _write_split(conf, "val_strict", VAL_N)
     return conf
@@ -167,10 +168,10 @@ def test_reader_run_end_to_end(cfg):
     contract = read_json(out_dir / "reader_inference.json")
     assert contract["reader_model_hash"] == model_hash
     assert contract["tokenizer_sha"] == summary["tokenizer_sha"]
-    assert contract["null_score_diff_threshold"] == 8.0
+    assert contract["null_score_diff_threshold"] == -0.4
     assert contract["tuned_on"] == "val_strict"
     assert contract["inference_config_sha"] == inference_config_sha(
-        cfg["reader"], threshold=8.0, model_hash=model_hash)
+        cfg["reader"], threshold=-0.4, model_hash=model_hash)
 
     training = read_json(out_dir / "training_args.json")
     assert training["train_rows"] == TRAIN_N
@@ -178,17 +179,19 @@ def test_reader_run_end_to_end(cfg):
     assert training["dropped_rows"] == []
 
     evaluation = read_json(out_dir / "reader_eval.json")
-    assert [row["threshold"] for row in evaluation["threshold_sweep"]] == [8.0]
+    # Selection-first order: the feasible row precedes the better-scoring all-null row.
+    assert [row["threshold"] for row in evaluation["threshold_sweep"]] == [-0.4, -0.5]
     selection = evaluation["threshold_selection"]
-    assert selection["chosen_threshold"] == 8.0
-    assert selection["n_feasible_thresholds"] == 1 and selection["n_thresholds"] == 1
-    assert selection["constraint_binding"] is False  # the single point satisfies §10
+    assert selection["objective"] == "f1_overall"
+    assert selection["chosen_threshold"] == -0.4
+    assert selection["n_feasible_thresholds"] == 1 and selection["n_thresholds"] == 2
+    assert selection["constraint_binding"] is True  # the objective alone would pick -0.5
+    assert selection["objective_only_threshold"] == -0.5
     oracle = evaluation["oracle_context"]
     assert oracle["n"] == VAL_N
     assert oracle["n_impossible"] == VAL_N // IMPOSSIBLE_EVERY
     assert oracle["acceptance_constraint_met"] is True
-    assert oracle["selection_objective"] == pytest.approx(
-        oracle["f1_answerable"] + oracle["no_answer_accuracy"])
+    assert oracle["selection_objective"] == pytest.approx(oracle["f1_overall"])
     assert evaluation["retrieved_context"]["status"] == "NOT_RUN"
     assert "build_retrieval" in evaluation["retrieved_context"]["reason"]
     assert evaluation["acceptance"]["val_metrics_saved"]["passed"] is True
@@ -252,6 +255,44 @@ def test_reader_is_frozen_after_training(cfg):
     with pytest.raises(RuntimeError, match="already holds a trained reader"):
         _reader_run(cfg, skip_gate=True)
     assert _reader_run(cfg, skip_gate=True, force=True)["reader_model_hash"]
+
+
+def test_reselect_rederives_the_threshold_without_retraining(cfg, monkeypatch):
+    # The gate result is written by a normal run; --reselect only re-reads it.
+    monkeypatch.setattr(train_reader, "overfit_smoke",
+                        lambda *, rows, **kwargs: {"loss_first": 1.0, "loss_last": 0.5,
+                                                   "loss_decreased": True, "rows": len(rows)})
+    _reader_run(cfg)
+    out_dir = train_reader.reader_dir(cfg)
+    weights = (out_dir / "model.safetensors").read_bytes()
+    training_args = (out_dir / "training_args.json").read_bytes()
+    assert read_json(out_dir / train_reader.INFERENCE_FILE)[
+        "null_score_diff_threshold"] == -0.4
+
+    cfg["reader"]["threshold_sweep"] = {"start": -0.4, "stop": -0.4, "step": 1.0}
+    summary = _reader_run(cfg, reselect_only=True)
+
+    assert summary["reselect"] is True and summary["reader_model_hash"]
+    # Only threshold-dependent artifacts are rewritten; weights and training args are not.
+    assert (out_dir / "model.safetensors").read_bytes() == weights
+    assert (out_dir / "training_args.json").read_bytes() == training_args
+    contract = read_json(out_dir / train_reader.INFERENCE_FILE)
+    assert contract["null_score_diff_threshold"] == -0.4 and contract["sweep_points"] == 1
+    evaluation = read_json(out_dir / train_reader.EVAL_FILE)
+    assert evaluation["reselect"]["previous_threshold"] == -0.4
+    assert evaluation["threshold_selection"]["chosen_threshold"] == -0.4
+    assert [row["status"] for row in read_jsonl(_registry(cfg).path)] == [
+        "RUNNING", "SUCCEEDED", "RUNNING", "SUCCEEDED"]
+    assert [row["stage"] for row in read_jsonl(_registry(cfg).path)] == [
+        "P3_reader", "P3_reader", "P3_reader_reselect", "P3_reader_reselect"]
+
+
+def test_reselect_refuses_without_a_frozen_reader(cfg):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _reader_run(cfg, force=True, reselect_only=True)
+    with pytest.raises(RuntimeError, match="no frozen reader"):
+        _reader_run(cfg, reselect_only=True)
+    assert [row["status"] for row in read_jsonl(_registry(cfg).path)] == ["RUNNING", "FAILED"]
 
 
 def test_overfit_gate_blocks_training_when_it_fails(cfg, monkeypatch):
@@ -336,7 +377,7 @@ def test_acceptance_gate_fails_the_run_and_withholds_the_contract(cfg, monkeypat
     with pytest.raises(RuntimeError, match="P3 acceptance failed"):
         _reader_run(cfg, skip_gate=True)
     out_dir = train_reader.reader_dir(cfg)
-    assert seen["threshold"] == 8.0
+    assert seen["threshold"] == -0.4
     # The evidence stays on disk, but the frozen contract does not: nothing may consume it.
     assert (out_dir / train_reader.EVAL_FILE).exists()
     assert not (out_dir / train_reader.INFERENCE_FILE).exists()
@@ -344,16 +385,41 @@ def test_acceptance_gate_fails_the_run_and_withholds_the_contract(cfg, monkeypat
 
 
 def test_require_acceptance_is_a_hard_gate():
-    checks = {"non_empty_span_with_valid_offset": {"passed": False, "example": None}}
+    span_fail = {"non_empty_span_with_valid_offset": {"passed": False, "example": None},
+                 "impossible_returns_null": {"passed": True, "n_null_on_impossible": 1,
+                                             "example_qid": "q"}}
     with pytest.raises(RuntimeError, match="acceptance failed"):
-        train_reader.require_acceptance(checks, threshold=-8.0)
+        train_reader.require_acceptance(span_fail, threshold=-8.0)
+
+    # D010: the null side is a hard gate too — the reader must not answer every negative.
+    null_fail = {"non_empty_span_with_valid_offset": {"passed": True, "example": None},
+                 "impossible_returns_null": {"passed": False, "n_null_on_impossible": 0,
+                                             "example_qid": None}}
+    with pytest.raises(RuntimeError, match="answer every negative"):
+        train_reader.require_acceptance(null_fail, threshold=0.0)
+
     train_reader.require_acceptance(
-        {"non_empty_span_with_valid_offset": {"passed": True, "example": None}}, threshold=0.0)
+        {"non_empty_span_with_valid_offset": {"passed": True, "example": None},
+         "impossible_returns_null": {"passed": True, "n_null_on_impossible": 1,
+                                     "example_qid": "q"}}, threshold=0.0)
 
 
 def test_sweep_without_a_feasible_threshold_fails_the_run(cfg):
     """D2: no threshold emits a span -> the selection raises and the run is FAILED."""
     cfg["reader"]["threshold_sweep"] = {"start": -50.0, "stop": -50.0, "step": 1.0}
+    with pytest.raises(ValueError, match="no threshold"):
+        _reader_run(cfg, skip_gate=True)
+    out_dir = train_reader.reader_dir(cfg)
+    assert not (out_dir / train_reader.INFERENCE_FILE).exists()
+    evaluation = read_json(out_dir / train_reader.EVAL_FILE)
+    assert evaluation["status"] == "SELECTION_FAILED"
+    assert evaluation["threshold_sweep"][0]["acceptance_constraint_met"] is False
+    assert [row["status"] for row in read_jsonl(_registry(cfg).path)] == ["RUNNING", "FAILED"]
+
+
+def test_sweep_that_answers_every_negative_fails_the_run(cfg):
+    """D010 constraint 2: the old +8 grid answered every pair; that must now FAIL the run."""
+    cfg["reader"]["threshold_sweep"] = {"start": 8.0, "stop": 8.0, "step": 1.0}
     with pytest.raises(ValueError, match="no threshold"):
         _reader_run(cfg, skip_gate=True)
     out_dir = train_reader.reader_dir(cfg)

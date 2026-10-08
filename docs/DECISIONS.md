@@ -107,6 +107,53 @@ copies were removed.
 
 The flag is an automated heuristic; no human review was performed, and this is stated in
 the CSV, the report and the JSON alike.
+
+## D007 — Laya base checkpoint resolution and the teacher JSONL row schema (2026-10-08)
+
+Resolves D003. The base is `convaiinnovations/laya-multilingual` (the 4-way `next_action`
+checkpoint on `jhu-clsp/mmBERT-base`, ~322M parameters), not `convaiinnovations/laya` (the
+`laya-train` CLI default) and not the spec's shorthand `multilingual`. `--base` accepts a
+local directory, so training never depends on Hub resolution at run time. The revision is
+resolved at run time, in this order (`src/pipeline/train_laya.resolve_revision`): a local
+directory needs none; an explicit `laya.revision` wins; otherwise the reviewed SHA for the
+repo id is read from `laya.revisions.PINNED_REVISIONS` **as installed** (never copied into
+source, so an upstream re-pin is picked up); otherwise the Hub commit SHA is queried with
+`HfApi().model_info(...).sha` and recorded. The snapshot is materialized with
+`snapshot_download(revision=..., allow_patterns=[rl_agent_config.json, model.safetensors,
+tokenizer/*, encoder/*])` and that local directory is what `--base` receives. Every run
+manifest records the base id, the revision, how it was chosen (`revision_source`: local |
+explicit | pinned | queried) and the SHA256 of the identity files (`model.safetensors`,
+`rl_agent_config.json`, `encoder/config.json`, `tokenizer/tokenizer.json`;
+`tokenizer/tokenizer_config.json` is excluded because the library repairs it in place on
+first load). The same repair is applied to the output checkpoint before hashing
+(`train_laya.normalize_checkpoint`), so the hash every run manifest records is the one later
+loads and P6 cache stamps see. At the currently pinned revision the resolved SHA is
+`e4e9ddf21a7b1903b7acffd8814ad4307bf63a67`. The configured `max_len=768` /
+`head_max_len=192` override the base's own 1024/256, i.e. training runs on shorter inputs
+than the published checkpoint; the saved checkpoint carries the budgets training used.
+
+The teacher file (`make_teacher`) is the `{state, questions, gold}` JSONL that
+`laya.train.finetune` reads: one row per reachable decision state, sorted by (qid,
+history):
+
+    {"state": <state_text.serialize_state(obs)>,         # the exact text a rollout feeds Laya
+     "questions": {"next_action": {"type": "choice", "instructions": ..., "criteria": {4}}},
+     "expected": {"next_action": "<argmax>"},            # hard label, always present
+     "gold": {"next_action": {"probabilities": {...}}},  # soft target; absent in hard mode
+     "meta": {qid, split, scenario_id, difficulty, privileged, state_hash, env_state_hash,
+              state_text_version, history, depth, valid_actions, expected, ambiguous,
+              teacher_mode, teacher_temperature}}
+
+Masked actions carry exactly 0.0 mass and the soft target sums to 1. `val_strict` rows are
+privileged hindsight (diagnostic only, never fit): they carry `meta.privileged = true` and
+their file is named `laya_val_diagnostic.jsonl` so it cannot be mistaken for training data.
+`laya-train`'s temperature calibration split (`calib_max=400, calib_frac=0.1,
+calib_seed=20260922`) is `TrainConfig`-only, so P5 trains in-process and records the
+equivalent CLI command together with the caveat that a CLI rerun is only equivalent while
+those values hold. `laya` 0.4.0 `finetune` writes no optimizer/scheduler state and always
+starts from epoch 0: resume is recorded as unsupported (spec 06 §5) and a rerun over an
+existing checkpoint is refused unless `--force`.
+
 ## D008 — P3 threshold selection, hard acceptance gate, profile scale, and bf16 training (2026-10-08)
 
 The first pilot reader was unusable and the pipeline reported success anyway. Two defects,
@@ -189,3 +236,136 @@ Nothing was retuned to make the numbers look better: the grid is base.yaml's, un
 cannot win a feasible sweep, a binding constraint is flagged, an infeasible sweep fails the
 run, and the hard gate raises and withholds the contract. Committed subset: 152 passed,
 1 skipped.
+
+## D009 — laya 0.4.0 CUDA fine-tuning: the pre-training calibration pass (2026-10-08)
+
+**Defect.** The pinned `laya` 0.4.0 cannot fine-tune on CUDA. In `laya/train.py`, `finetune`
+scores the eval items with `calibration_records(model, tok, eval_items, dev, ...)` (line
+1086) before `train_model`, whose `model.to(device)` (line 638) is the first place the model
+is moved. `calibration_records` (defined line 709) sends every batch to `dev` through
+`_forward` (line 607, called line 718) while the encoder is still on cpu (`load_checkpoint`
+returns it there), so a `--device cuda` run dies before the first optimizer step:
+
+    RuntimeError: Expected all tensors to be on the same device, but got index is on cuda:0,
+    different from other tensors on cpu (when checking argument in method
+    wrapper_CUDA__index_select)
+
+Every normal run hits it: the pre-train check runs whenever there are eval items, and with
+no `--eval` file the eval set defaults to the calibration slice (`n_calib = min(calib_max,
+int(len(items) * calib_frac))`, at least one item for any 10+ item dataset). Reproduced with
+the library API alone and by the vendor `laya-train` CLI, which calls the same `finetune`;
+the failing run is `p5-laya-ce-smoke-2026-10-08T142044+0000` (FAILED) in
+`outputs/runs/index.jsonl` with exactly that message.
+
+**Fix, and why it lives in our code.** `train_laya.patch_calibration_records`
+(`src/pipeline/train_laya.py:99`, applied at the `finetune` call site) wraps
+`laya.train.calibration_records` in-process: the wrapper runs `model.to(device)` and then
+delegates the call unchanged. Site-packages is never edited — `laya` 0.4.0 is the reviewed
+pin every run manifest records under `library_versions`, and a patched installed tree would
+silently diverge from what a reinstall, a reviewer, or the recorded `equivalent_cli_command`
+reproduces. An upgrade is not taken either: 0.4.0 is the newest release on PyPI and still
+has the defect, so the workaround's job is to keep the reviewed pin valid. The workaround is
+**self-neutralizing**: `model.to(device)` on a model already on `device` is a no-op, so a
+future laya that moves the model before its first calibration pass makes the wrapper do
+nothing; it can then be deleted with no other change. Applying it twice is also a no-op
+(guard flag on the wrapper). Known gap, unchanged: the recorded `laya-train` CLI equivalent
+still hits the defect on CUDA (the wrapper lives in our process; this stage never runs the
+CLI).
+
+**Evidence.** `tests/test_train_laya.py::test_the_calibration_patch_moves_the_model_first_and_wraps_once`
+monkeypatches `laya.train.calibration_records` with a spy and records `.to` calls on a tiny
+`torch.nn.Module`: the delegate must already see `.to(device)` applied (proved on cpu — no
+CUDA needed), arguments are forwarded unchanged, and a second application must not
+double-wrap. The bounded GPU smoke reused the earlier CPU smoke's fixture teacher set (14
+rows, `laya_train.jsonl` sha `2b6a8b61…`) and micro settings — 1 epoch, `--max-len 512
+--micro-batch 1 --grad-accum 1` — changing only the device:
+
+| | CPU smoke (earlier, control) | GPU smoke (this workaround) |
+|---|---|---|
+| run | `p5-laya-ce-smoke-2026-10-08T143644+0000` | `p5-laya-ce-smoke-2026-10-08T145012+0000` (`kind=GPU_SMOKE`) |
+| exit / walltime | 0 / 87.0 s | 0 / 20.2 s |
+| device | cpu | cuda (`device cuda` in the training log) |
+| epoch loss | [1.5400] | [2.0360] (finite; cpu and cuda runs are not bit-comparable) |
+| peak VRAM (torch) | — (cpu) | 6162.2 MiB; nvidia-smi 6468 -> 13082 MiB over 11 samples, with the co-tenant P3 reader chain running |
+| model hash | `2e00a143…`, stable across load | `aba24a4d…`, stable across load |
+| `LayaAdapter.load` + `predict_probs` | [14, 4], finite, rows sum to 1 (max error 1.1e-16) | [14, 4], finite, rows sum to 1 (max error 2.2e-16) |
+
+The smoke exercises the exact failing call: `eval items 1 (calibration_slice)` in the log
+precedes `epoch 1/1 mean loss 2.0360`, and the run completes both calibration passes and
+writes the checkpoint; the same configuration without the wrapper is the FAILED run above.
+
+**Tests.** `pytest tests/test_train_laya.py tests/test_laya_adapter.py tests/test_laya_cache.py
+tests/test_state_text.py tests/test_make_teacher.py -q`: 75 passed.
+
+## D010 — P3 threshold selection: overall F1 behind both §10 constraints (2026-10-08)
+
+**Defect.** D008's objective — among thresholds with at least one valid span, maximize
+`f1_answerable + no_answer_accuracy` — is structurally abstention-biased, and degenerated on
+the freshly trained medium reader (5,000 train questions; val_strict: 3107 answerable / 1292
+impossible). The sum equals `1 + (f1_answerable - false_answer_rate)`, because
+`no_answer_accuracy = 1 - false_answer_rate` on the disjoint impossible set: it can only
+prefer answering when answerable F1 exceeds the false-answer rate, and it saturates at 1.0 as
+the reader abstains. Medium sweep:
+
+| threshold | answered answerable | f1_answerable | no_answer_accuracy | D008 sum | f1_overall |
+|---|---|---|---|---|---|
+| -4.5 (selected by D008) | 41/3107 | 0.0101 | 0.9907 | **1.0008** | 0.2981 |
+| 0.0 | 2282/3107 | 0.4498 | 0.2957 | 0.7455 | 0.4045 |
+| 0.5 (selected by D010) | 2475/3107 | 0.4757 | 0.2384 | 0.7141 | **0.4060** |
+
+Every answering threshold scored below 1.0 while the near-abstain row at -4.5 scored above
+it, so the run froze a reader answering 41 of 3107 answerable questions — the "answers
+nothing" defect §8.6 flags, *produced by the selection objective itself*. The checkpoint was
+fine: the same frozen reader scores f1_answerable 0.547 under forced decode. The spec never
+mandated the sum: §4 says only "tune the threshold on strict validation"; §1 defines the
+reader as a candidate generator; §8.6 lists BOTH degenerate extremes (answers nothing /
+answers every negative) as defects to inspect before anything else.
+
+**Rule.** `threshold_objective` = `f1_overall` (SQuAD2 convention: an impossible question is
+scored against the empty reference, so a correct null contributes 1.0 and abstaining cannot
+win the metric by itself); tie-break `em_overall`, then the lower threshold.
+`acceptance_constraint_met` now requires BOTH §10 acceptance conditions at the chosen
+threshold — at least one non-empty span with valid provenance, and at least one impossible
+question returned null — and `selection_key` sorts feasible-first, so feasibility decides
+before the objective. An infeasible sweep still raises and the run fails via the existing
+SELECTION_FAILED path (D008's hard gate kept). The constraints remain load-bearing even under
+overall F1: on a weak reader an all-null row still has the best raw `f1_overall` (correct
+nulls score 1.0 — the smoke fixture's all-null point provably out-scores every spanning
+threshold; constraint 1 excludes it), and a reader answering every negative has
+`f1_overall = f1_answerable` (constraint 2 excludes it). D008's wounded-pilot concern is
+resolved structurally instead of by the sum.
+
+**Result.** `python -m src.pipeline.train_reader --profile medium --reselect` (new run
+`p3-reader-medium-reselect-2026-10-08T152522+0000`, stage `P3_reader_reselect`) re-derived the
+threshold of the frozen checkpoint without touching its weights. Selected threshold **0.5**:
+
+- answered answerable 2475/3107 (f1_answerable 0.4757, em_answerable 0.2900);
+- answered impossible 984/1292 (no_answer_accuracy 0.2384, false_answer_rate 0.7616);
+- f1_overall 0.4060, em_overall 0.2748; 25 of the 33 thresholds feasible, and f1_overall is
+  the max over the feasible set (runners-up 1.0 → 0.4057, 1.5 → 0.4052);
+- infeasible rows: 7.5/8.0 (answer every negative) and -8.0..-5.5 (answer nothing);
+- `constraint_binding: false` — on the trained reader the objective's own argmax is feasible,
+  which is the D008 worry resolved rather than worked around.
+
+`--reselect` loads the frozen checkpoint through the same `ReaderInference.load` contract
+consumers use, re-runs the exact `_evaluate` val path (oracle sweep over all val rows,
+retrieved-context metrics, both acceptance checks, predictions parquet, checksums) and
+rewrites only the threshold-dependent artifacts (`reader_eval.json`, `reader_inference.json`,
+`reader_predictions_val.parquet`, `model_card.md`, `checksums.json`) — never the weights,
+tokenizer, or `training_args.json` (verified byte-identical after the run). The overfit gate
+is read from the recorded `overfit_smoke.json`; it is never re-run or faked. A missing frozen
+reader is refused cleanly with a FAILED registry row; `--force` and `--reselect` are mutually
+exclusive. Fold readers (`train_correctness`) inherit the rule: an infeasible fold sweep is
+recorded as a FAILED fold carrying the raise's message and the remaining folds continue; the
+stage fails outright only when every fold is infeasible.
+
+**Tests.** `tests/test_reader.py` + `tests/test_reader_pipeline.py` (updated for D010): the
+all-null row still cannot win a feasible sweep; a sweep that never nulls an impossible
+question is infeasible; a higher-`f1_overall` row wins even when an abstention-heavy row has
+the higher D008 sum (built from the real medium rows at -4.5 and 0.5); ties break on
+`em_overall` then the lower threshold; `selection_report` reports the new objective and key;
+`require_acceptance` raises when the impossible-side check fails; the old +8 smoke grid
+(answers every negative) now FAILS the run; and `--reselect` rewrites the threshold artifacts
+while weights and `training_args.json` stay byte-identical, refusing cleanly without a frozen
+reader. Full command: `pytest tests/test_reader.py tests/test_reader_pipeline.py
+tests/test_correctness.py tests/test_baselines.py -q`: 72 passed.

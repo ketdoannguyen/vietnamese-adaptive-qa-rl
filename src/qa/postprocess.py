@@ -147,14 +147,14 @@ def sweep_threshold(spans: Mapping[tuple[str, str], BestSpan], gold: Mapping[str
     (:func:`acceptance_constraint_met`, :func:`threshold_objective`) and are sorted by
     :func:`selection_key`, so ``sweep[0]`` is the row the selection rule picks.
 
-    Overall EM/F1 are deliberately **not** the selection objective: they are computed with
-    an empty reference for impossible questions, so on a dataset with a large impossible
-    share an always-null reader scores ``em_overall`` equal to that share and beats any
-    answering threshold (a real pilot sweep was decided by the all-null row at the bottom of
-    the grid). Selection follows D008 instead — feasibility first (>=1 non-empty span with
-    valid provenance, `02_IMPLEMENTATION/03_QA_READER_TRAINING_AND_CACHE.md` §10), then
-    ``f1_answerable + no_answer_accuracy``, then ``em_answerable``, then the lower threshold.
-    Per-row metrics are kept as-is so both the constraint and the objective stay auditable.
+    Selection follows D010: feasibility first — both §10 acceptance requirements
+    (`02_IMPLEMENTATION/03_QA_READER_TRAINING_AND_CACHE.md`: >=1 non-empty span with valid
+    provenance, and >=1 impossible question returned null) — then ``f1_overall``, then
+    ``em_overall``, then the lower threshold. The earlier D008 sum
+    (``f1_answerable + no_answer_accuracy``) is algebraically ``1 + (f1_answerable -
+    false_answer_rate)`` and cannot prefer answering for a weak reader; the full argument
+    and the medium-reader evidence live in :func:`threshold_objective`. Per-row metrics are
+    kept as-is so both the constraints and the objective stay auditable.
     """
     rows = []
     for threshold in thresholds:
@@ -171,40 +171,58 @@ def sweep_threshold(spans: Mapping[tuple[str, str], BestSpan], gold: Mapping[str
 
 
 def acceptance_constraint_met(row: Mapping) -> bool:
-    """§10's acceptance requirement, per threshold: at least one non-empty span with valid
-    provenance on the val predictions.
+    """Both of §10's acceptance requirements, per threshold.
+
+    (1) at least one non-empty span with valid provenance on the val predictions;
+    (2) at least one impossible question returned null (``answered_impossible <
+    n_impossible``, equivalently ``no_answer_accuracy > 0``). A threshold satisfying only
+    (1) below every impossible margin would answer every negative, the other degenerate
+    extreme §8.6 flags — the reader is a candidate generator (§1), so the sweep must never
+    freeze either an always-abstain or an always-answer reader.
 
     ``answered_*`` come from :func:`src.qa.reader_eval.evaluate_predictions` (a question
     counts as answered when the threshold left a non-null span), and ``provenance_failures``
     are subtracted so the count stays correct if a caller passes unverified predictions.
     """
     answered = int(row["answered_answerable"]) + int(row["answered_impossible"])
-    return answered - int(row.get("provenance_failures", 0)) >= 1
+    non_empty_span = answered - int(row.get("provenance_failures", 0)) >= 1
+    nulls_an_impossible = int(row["answered_impossible"]) < int(row["n_impossible"])
+    return non_empty_span and nulls_an_impossible
 
 
 def threshold_objective(row: Mapping) -> float:
-    """D008 selection objective: ``f1_answerable + no_answer_accuracy``.
+    """D010 selection objective: ``f1_overall`` (the SQuAD2-style overall F1).
 
-    The two terms live on disjoint question sets (answerable / impossible), so abstaining on
-    one side cannot inflate the other; the constraint above is still needed because an
-    always-null reader trivially maximizes ``no_answer_accuracy`` at 1.0.
+    Impossible questions are scored against the empty reference, so a correct null
+    contributes 1.0 and abstaining cannot win the metric by itself; the two §10 constraints
+    (:func:`acceptance_constraint_met`) keep the degenerate extremes out of the selection.
+
+    D008's ``f1_answerable + no_answer_accuracy`` is abandoned because it is structurally
+    abstention-biased: algebraically it equals ``1 + (f1_answerable - false_answer_rate)``,
+    so it can only prefer answering by the margin answerable F1 exceeds the false-answer
+    rate. On the medium reader's sweep (val: 3107 answerable / 1292 impossible) no answering
+    threshold did: every answering row stayed below 1.0 (at 0.5: 0.476 + 0.238 = 0.714)
+    while the near-abstain row at -4.5 — which answers 41/3107 answerable questions, F1
+    0.010 — scored 1.0008 = 0.010 + 0.991. The rule therefore selected a reader whose forced
+    -decode F1 is 0.547, and the same frozen reader scores ``f1_overall`` 0.298 there versus
+    0.406 at the row this objective selects.
     """
-    return float(row["f1_answerable"]) + float(row["no_answer_accuracy"])
+    return float(row["f1_overall"])
 
 
 def selection_key(row: Mapping) -> tuple:
-    """D008 ordering: feasible thresholds first, then objective, EM, lower threshold."""
+    """D010 ordering: feasible thresholds first, then overall F1, overall EM, lower threshold."""
     return (not acceptance_constraint_met(row), -threshold_objective(row),
-            -float(row["em_answerable"]), float(row["threshold"]))
+            -float(row["em_overall"]), float(row["threshold"]))
 
 
 def choose_best_threshold(sweep: Sequence[Mapping]) -> dict:
     """Best row of a threshold sweep under :func:`selection_key`.
 
-    Raises ``ValueError`` when no threshold emits a non-empty span with valid provenance:
-    the reader answers nothing at every point of the grid, P3's acceptance check cannot be
-    met, and shipping the always-null row would silently freeze a reader that abstains
-    always (D008).
+    Raises ``ValueError`` when no threshold satisfies both §10 acceptance constraints: the
+    reader answers nothing at every point of the grid, or it never returns null on an
+    impossible question. Either extreme would be frozen as the deployed reader, so the run
+    must fail instead (D010); the caller keeps the sweep on disk as evidence.
     """
     if not sweep:
         raise ValueError("empty threshold sweep")
@@ -212,27 +230,29 @@ def choose_best_threshold(sweep: Sequence[Mapping]) -> dict:
     if not acceptance_constraint_met(best):
         thresholds = [float(row["threshold"]) for row in sweep]
         raise ValueError(
-            f"no threshold in {min(thresholds)}..{max(thresholds)} ({len(sweep)} points) emits "
-            f"a non-empty span with valid provenance on val: the reader abstains at every "
-            f"point (best objective {threshold_objective(best):.4f}), so the §10 acceptance "
-            "check cannot pass and the run must fail (D008)")
+            f"no threshold in {min(thresholds)}..{max(thresholds)} ({len(sweep)} points) "
+            "meets both §10 acceptance constraints on val — at least one non-empty span with "
+            "valid provenance, and at least one impossible question returned null — so the "
+            f"acceptance check cannot pass and the run must fail (D010; best objective "
+            f"{threshold_objective(best):.4f})")
     return best
 
 
 def selection_report(sweep: Sequence[Mapping]) -> dict:
     """Audit record of the selection decision, stored next to the sweep in ``reader_eval.json``.
 
-    ``constraint_binding`` is true when the row the objective alone would pick fails the
-    acceptance constraint, so the constraint — not the objective — decided the threshold.
+    ``constraint_binding`` is true when the row the objective alone would pick fails a §10
+    constraint, so feasibility — not the objective — decided the threshold.
     """
     chosen = choose_best_threshold(sweep)
     objective_only = min(sweep, key=lambda row: (-threshold_objective(row),
-                                                 -float(row["em_answerable"]),
+                                                 -float(row["em_overall"]),
                                                  float(row["threshold"])))
     return {
-        "objective": "f1_answerable + no_answer_accuracy",
-        "constraint": "at least one non-empty span with valid provenance at the chosen "
-                      "threshold (03_QA_READER_TRAINING_AND_CACHE.md §10)",
+        "objective": "f1_overall",
+        "constraint": "both §10 acceptance constraints at the chosen threshold: at least one "
+                      "non-empty span with valid provenance and at least one impossible "
+                      "question returned null (03_QA_READER_TRAINING_AND_CACHE.md §10)",
         "chosen_threshold": float(chosen["threshold"]),
         "chosen_objective": threshold_objective(chosen),
         "n_thresholds": len(sweep),

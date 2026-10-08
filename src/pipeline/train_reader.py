@@ -2,18 +2,24 @@
 
     python -m src.pipeline.train_reader --profile small --overfit-smoke
     python -m src.pipeline.train_reader --profile small
+    python -m src.pipeline.train_reader --profile medium --reselect
 
 ``--overfit-smoke`` is the acceptance gate of `03_...md` §8.2 and runs first: 32 training
 windows must show a real loss decrease, otherwise the bug is in the data/feature path and RL
 must not start. It is also run automatically (once) before the real fine-tune unless a
 passing gate result already exists for the same config.
 
+``--reselect`` re-derives the threshold of an already-frozen reader (D010): it loads the
+saved checkpoint, re-runs the val evaluation exactly as a retrain would, and rewrites only
+the threshold-dependent artifacts — never the weights, never training_args.json.
+
 Training data is ``train_strict`` only. The null threshold is swept on ``val_strict``, never
-on test, and is chosen feasibility-first (§10: at least one non-empty span with valid
-provenance) and then by ``f1_answerable + no_answer_accuracy`` — overall EM cannot decide it,
-because on an impossible-heavy val set the always-null threshold wins it (D008). A sweep with
-no feasible point fails the run instead of freezing an abstain-always reader. The reader is
-evaluated in two conditions, both reported:
+on test, and is chosen feasibility-first — both §10 acceptance constraints: at least one
+non-empty span with valid provenance and at least one impossible question returned null —
+and then by ``f1_overall``, the SQuAD2-style overall F1 that prices answers and abstentions
+in one number (D010). A sweep in which no threshold meets both constraints fails the run
+instead of freezing a degenerate reader. The reader is evaluated in two conditions, both
+reported:
 
 * **oracle-context** — the reader is given the gold passage (answerable) or the source passage
   in which the answer is absent (impossible);
@@ -55,7 +61,7 @@ from src.retrieval.states import reachable_states, retrieved_doc_ids
 from src.utils.config import add_profile_args, config_from_args, profile_limit, resolve, \
     snapshot_config
 from src.utils.hashing import sha256_file, sha256_json
-from src.utils.io import atomic_write_json, read_jsonl, write_parquet
+from src.utils.io import atomic_write_json, read_json, read_jsonl, write_parquet
 from src.utils.reproducibility import capture_library_versions
 from src.utils.runs import RunRegistry, now_iso
 
@@ -206,32 +212,48 @@ def acceptance(metrics_oracle: Mapping[str, Any], spans: Mapping[tuple[str, str]
 
 
 def require_acceptance(checks: Mapping[str, Any], *, threshold: float) -> None:
-    """D008 hard gate: a reader that never emits a span is a FAILED run, not a SUCCEEDED one.
+    """Hard gate: a degenerate reader is a FAILED run, not a SUCCEEDED one.
 
-    `03_QA_READER_TRAINING_AND_CACHE.md` §10 requires at least one prediction with a
-    non-empty span and a valid source offset; before D008 the check was recorded as
-    ``passed: false`` while the run was still registered SUCCEEDED. Raising here (before
-    training is registered as an artifact) makes the registry record FAILED.
+    `03_QA_READER_TRAINING_AND_CACHE.md` §10 requires both acceptance conditions — at least
+    one prediction with a non-empty span and a valid source offset, and one impossible case
+    returning null under the tested threshold. Before D008 the span check was recorded as
+    ``passed: false`` while the run was still registered SUCCEEDED; raising here (before the
+    frozen contract is written) makes the registry record FAILED. The null-side check is
+    enforced too (D010): a reader that answers every negative must not be frozen either.
     """
     if not checks["non_empty_span_with_valid_offset"]["passed"]:
         raise RuntimeError(
             f"P3 acceptance failed: at the selected threshold {threshold} no val prediction "
             "has a non-empty span with a valid source offset (`03_...md` §10) — the reader "
             "would answer nothing, so the run must not be accepted (D008)")
+    if not checks["impossible_returns_null"]["passed"]:
+        raise RuntimeError(
+            f"P3 acceptance failed: at the selected threshold {threshold} no impossible val "
+            "question returns null (`03_...md` §10) — the reader would answer every "
+            "negative, so the run must not be accepted (D010)")
 
 
 # -------------------------------------------------------------------------------- run
 
 def run(*, cfg: dict, profile: str, force: bool = False, overfit_smoke_only: bool = False,
-        skip_gate: bool = False, registry: RunRegistry | None = None) -> dict[str, Any]:
+        skip_gate: bool = False, reselect_only: bool = False,
+        registry: RunRegistry | None = None) -> dict[str, Any]:
+    if force and reselect_only:
+        raise ValueError("`force` and `reselect_only` are mutually exclusive: --force retrains "
+                         "the reader, --reselect re-derives the threshold of the frozen "
+                         "checkpoint it must not touch")
+    if overfit_smoke_only and reselect_only:
+        raise ValueError("`overfit_smoke_only` and `reselect_only` are mutually exclusive")
     reader_cfg = cfg["reader"]
     # Training precision: bf16 wins when the profile opts in (see use_bf16); fp16 and bf16
     # are mutually exclusive in TrainingArguments. Inference precision is untouched.
     train_bf16 = use_bf16(reader_cfg)
     train_fp16 = use_fp16(reader_cfg) and not train_bf16
     out_dir = reader_dir(cfg)
-    run_id = f"p3-reader-{profile}-{now_iso().replace(':', '')}"
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
+    if reselect_only:
+        return _reselect(cfg, profile=profile, out_dir=out_dir, registry=registry)
+    run_id = f"p3-reader-{profile}-{now_iso().replace(':', '')}"
     registry.append(run_id=run_id, stage="P3_reader", status="RUNNING", profile=profile,
                     overfit_smoke_only=overfit_smoke_only, force=force)
     artifacts_written: list[Path] = []
@@ -317,6 +339,68 @@ def run(*, cfg: dict, profile: str, force: bool = False, overfit_smoke_only: boo
                              reader_model_hash=model_hash, tokenizer_sha=tokenizer_sha)
     return {"run_id": run_id, "reader_dir": str(out_dir), "reader_model_hash": model_hash,
             "tokenizer_sha": tokenizer_sha, "train": train_summary, "eval": evaluation,
+            "artifacts": [str(p) for p in artifacts_written]}
+
+
+def _reselect(cfg: dict, *, profile: str, out_dir: Path,
+              registry: RunRegistry) -> dict[str, Any]:
+    """Re-derive the null threshold of a frozen reader without touching its weights (D010).
+
+    The saved checkpoint is loaded through the same :class:`~src.qa.infer.ReaderInference`
+    contract every consumer uses and evaluated by :func:`_evaluate` — oracle-context sweep
+    over all val rows, retrieved-context metrics, acceptance checks, predictions parquet —
+    so only the selection rule differs from a retrain. The rewritten artifacts are exactly
+    the ones that embed the threshold: ``reader_eval.json``, ``reader_inference.json``,
+    ``reader_predictions_val.parquet``, ``model_card.md`` and ``checksums.json``. The
+    weights, the tokenizer and ``training_args.json`` are never written; the overfit-gate
+    evidence is read from the existing ``overfit_smoke.json`` because the gate measures
+    training, which this path does not perform and must not fake. A distinct run id keeps
+    the re-selection auditable next to the original training run.
+    """
+    run_id = f"p3-reader-{profile}-reselect-{now_iso().replace(':', '')}"
+    registry.append(run_id=run_id, stage="P3_reader_reselect", status="RUNNING",
+                    profile=profile, reselect=True)
+    try:
+        if not (out_dir / "model.safetensors").exists():
+            raise RuntimeError(
+                f"{out_dir} holds no frozen reader (model.safetensors missing); train one "
+                "first with `python -m src.pipeline.train_reader --profile <profile>`")
+        gate_path = out_dir / GATE_FILE
+        if not gate_path.exists():
+            raise RuntimeError(
+                f"{gate_path} is missing: --reselect reuses the recorded overfit-gate result "
+                "and never re-runs the gate or training")
+        training_args_path = out_dir / "training_args.json"
+        if not training_args_path.exists():
+            raise RuntimeError(
+                f"{training_args_path} is missing: the rewritten model card reports the "
+                "recorded training summary, and --reselect never retrains")
+        gate_summary = read_json(gate_path)
+        model_hash = reader_model_hash(out_dir)
+        tokenizer_sha = tokenizer_hash(load_tokenizer(str(out_dir)))
+        previous_threshold = None
+        if (out_dir / INFERENCE_FILE).exists():
+            previous_threshold = read_json(out_dir / INFERENCE_FILE).get(
+                "null_score_diff_threshold")
+        evaluation = _evaluate(
+            cfg, profile=profile, out_dir=out_dir, model_hash=model_hash,
+            tokenizer_sha=tokenizer_sha, gate_summary=gate_summary,
+            extra={"reselect": {"rule": "D010", "previous_threshold": previous_threshold}})
+        artifacts_written = evaluation.pop("paths")
+        save_model_card(out_dir, base_model=cfg["reader"]["base_model"],
+                        revision=cfg["reader"].get("revision"), tokenizer_sha=tokenizer_sha,
+                        summary=read_json(training_args_path),
+                        metrics=evaluation["oracle_context"])
+        artifacts_written += [out_dir / "model_card.md", out_dir / CHECKSUMS_FILE]
+        atomic_write_json(out_dir / CHECKSUMS_FILE, _checksums(out_dir))
+    except Exception as exc:
+        registry.append(run_id=run_id, stage="P3_reader_reselect", status="FAILED",
+                        profile=profile, error=f"{type(exc).__name__}: {exc}")
+        raise
+    registry.record_artifact(run_id, "P3_reader_reselect", artifacts_written, profile=profile,
+                             reader_model_hash=model_hash, tokenizer_sha=tokenizer_sha)
+    return {"run_id": run_id, "reader_dir": str(out_dir), "reader_model_hash": model_hash,
+            "tokenizer_sha": tokenizer_sha, "reselect": True, "eval": evaluation,
             "artifacts": [str(p) for p in artifacts_written]}
 
 
@@ -427,6 +511,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--skip-gate", action="store_true",
                         help="skip the automatic overfit gate before the real run")
     parser.add_argument("--force", action="store_true", help="retrain even if a reader exists")
+    parser.add_argument("--reselect", action="store_true",
+                        help="re-run the val evaluation and re-select the null threshold of "
+                             "the frozen reader (D010) without retraining")
     parser.add_argument("--json", action="store_true", help="print the full summary as JSON")
     args = parser.parse_args(argv)
     cfg = config_from_args(args)
@@ -434,7 +521,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg["data"]["profile"] = profile
     snapshot_config(cfg, resolve(cfg, "manifests") / f"P3_reader_{profile}_config.yaml")
     summary = run(cfg=cfg, profile=profile, force=args.force,
-                  overfit_smoke_only=args.overfit_smoke, skip_gate=args.skip_gate)
+                  overfit_smoke_only=args.overfit_smoke, skip_gate=args.skip_gate,
+                  reselect_only=args.reselect)
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
@@ -445,9 +533,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     evaluation = summary["eval"]
     oracle = evaluation["oracle_context"]
-    print(f"run_id={summary['run_id']} reader_model_hash={summary['reader_model_hash'][:16]}")
-    print(f"  train: {summary['train']['examples']} windows, final loss "
-          f"{summary['train']['final_loss']}")
+    print(f"run_id={summary['run_id']} reader_model_hash={summary['reader_model_hash'][:16]}"
+          + (" (reselect: weights untouched)" if summary.get("reselect") else ""))
+    if "train" in summary:
+        print(f"  train: {summary['train']['examples']} windows, final loss "
+              f"{summary['train']['final_loss']}")
     print(f"  threshold {evaluation['null_score_diff_threshold']}: "
           f"answered(answerable)={oracle['answered_answerable']}/{oracle['n_answerable']} "
           f"F1(answerable)={oracle['f1_answerable']:.4f} "

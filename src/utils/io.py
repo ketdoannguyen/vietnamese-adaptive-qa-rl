@@ -10,6 +10,8 @@ from typing import Any, Iterable, Iterator
 
 import yaml
 
+from src.utils.hashing import sha256_file
+
 
 def read_yaml(path: str | Path) -> dict:
     with open(path, "r", encoding="utf-8") as fh:
@@ -83,3 +85,15 @@ def append_jsonl(path: str | Path, row: dict) -> None:
 
 def append_jsonl_safe(path: str | Path, row: dict) -> None:
     append_jsonl(path, row)
+
+
+def write_parquet(path: str | Path, rows: Iterable[dict]) -> dict:
+    """Write rows as zstd parquet; returns ``{rows, sha256, bytes}`` for the run registry."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pylist([dict(row) for row in rows])
+    pq.write_table(table, str(path), compression="zstd")
+    return {"rows": table.num_rows, "sha256": sha256_file(path), "bytes": path.stat().st_size}

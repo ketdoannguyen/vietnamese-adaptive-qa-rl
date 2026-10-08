@@ -88,9 +88,7 @@ def _nfc_index_map(raw: str) -> tuple[str, array | None]:
     if unicodedata.is_normalized("NFC", raw):
         return raw, None
     out: list[str] = []
-    idx = array("i", [-1]) * 0 if False else array("i", bytes(4 * len(raw)))
-    for i in range(len(raw)):
-        idx[i] = -1
+    idx = array("i", [-1]) * len(raw)
     for start, end in _segments(raw):
         base = len(out)
         out.extend(unicodedata.normalize("NFC", raw[start:end]))
@@ -113,9 +111,7 @@ def build_display_map(raw: str) -> tuple[str, array | None]:
         return display, None
     nfc_text, nfc_map = _nfc_index_map(raw)
     collapsed: list[str] = []
-    cmap = array("i", bytes(4 * len(nfc_text)))
-    for i in range(len(nfc_text)):
-        cmap[i] = -1
+    cmap = array("i", [-1]) * len(nfc_text)
     prev_space = False
     for i, ch in enumerate(nfc_text):
         if ch.isspace():
@@ -136,7 +132,7 @@ def build_display_map(raw: str) -> tuple[str, array | None]:
     text = "".join(collapsed)
     if text != display:  # should be unreachable; keeps the map honest if it is not
         return display, None
-    idx = array("i", bytes(4 * len(raw)))
+    idx = array("i", [-1]) * len(raw)
     for i in range(len(raw)):
         j = nfc_map[i] if nfc_map is not None else i
         idx[i] = cmap[j] if j >= 0 else -1
@@ -167,23 +163,22 @@ class TextNormalizer:
     def span(self, raw: str, start: int, length: int) -> tuple[int, int] | None:
         """Map a verified raw span into display coordinates, or None if unmappable."""
         display, idx = self._entry(raw)
+        raw_span = raw[start:start + length]
         if idx is None:
-            ds, de = start, start + length
-        else:
-            if start < 0 or start + length > len(idx):
-                return None
-            ds = idx[start]
-            if ds < 0:
-                return None
-            de = -1
-            for j in range(start + length - 1, start - 1, -1):
-                if idx[j] >= 0:
-                    de = idx[j] + 1
-                    break
-            if de <= ds:
-                return None
-        span_text = display[ds:de]
-        if span_text != normalize_text(raw[start:start + length]):
+            return start, start + length  # display is byte-identical to raw
+        if start < 0 or start + length > len(idx):
+            return None
+        ds = idx[start]
+        if ds < 0:
+            return None
+        de = -1
+        for j in range(start + length - 1, start - 1, -1):
+            if idx[j] >= 0:
+                de = idx[j] + 1
+                break
+        if de <= ds:
+            return None
+        if display[ds:de] != normalize_text(raw_span):
             return None
         return ds, de
 
@@ -387,6 +382,11 @@ class RecordNormalizer:
         starts_display: list[int] = []
         texts_display: list[str] = []
         for text, start in zip(texts, starts):
+            if context_raw[start:start + len(text)] != text:
+                # the raw span itself is unverified (unrecoverable) — never invent a
+                # display span from an offset that does not point at the gold text
+                notes.append(f"display_offset_unverified:{start}")
+                continue
             span = self.text.span(context_raw, start, len(text))
             if span is None:
                 notes.append(f"display_offset_unmappable:{start}")

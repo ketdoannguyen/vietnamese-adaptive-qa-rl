@@ -43,6 +43,14 @@ def resolve(cfg: dict, key: str) -> Path:
     return p if p.is_absolute() else REPO_ROOT / p
 
 
+def profile_limit(cfg: dict, profile: str) -> int | None:
+    """Number of QA records a data profile uses (``None`` = no cap)."""
+    caps = cfg["data"]["caps"]
+    if profile not in caps:
+        raise ValueError(f"unknown profile {profile!r}; known: {sorted(caps)}")
+    return caps[profile]
+
+
 def snapshot_config(cfg: dict, out_path: str | Path) -> str:
     """Write the fully-resolved config next to a run and return its sha256."""
     import json

@@ -1,0 +1,17 @@
+{
+  "huggingface": {
+    "url": "https://huggingface.co",
+    "http_code": "200",
+    "ok": true
+  },
+  "pypi": {
+    "url": "https://pypi.org",
+    "http_code": "200",
+    "ok": true
+  },
+  "github": {
+    "url": "https://github.com",
+    "http_code": "200",
+    "ok": true
+  }
+}

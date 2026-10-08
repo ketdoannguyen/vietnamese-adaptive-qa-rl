@@ -1,0 +1,32 @@
+# Environment
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Secrets — never commit
+.env
+*.token
+hf_token*
+
+# Data: redistribution rights of the source dataset are not verified; keep local only
+data/raw/
+data/processed/
+data/scenarios/
+data/indexes/
+data/cache/
+data/diagnostics/
+
+# Model weights and large outputs
+outputs/models/
+outputs/predictions/
+outputs/runs/
+*.safetensors
+*.bin
+*.pt
+*.pkl
+*.parquet
+*.faiss
+*.npz

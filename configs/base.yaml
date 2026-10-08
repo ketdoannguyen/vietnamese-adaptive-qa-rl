@@ -1,0 +1,135 @@
+# Master configuration for vietnamese-adaptive-qa-rl.
+# Profiles (smoke/pilot/medium/full) override `data.profile` values below.
+# Every value that changes an experiment outcome must be logged into the run manifest.
+
+project:
+  name: vietnamese-adaptive-qa-rl
+  version: "0.1.0"
+
+seed: 42
+
+paths:
+  data_raw: data/raw
+  data_processed: data/processed
+  data_scenarios: data/scenarios
+  data_indexes: data/indexes
+  data_cache: data/cache
+  data_diagnostics: data/diagnostics
+  outputs: outputs
+  models: outputs/models
+  runs: outputs/runs
+  predictions: outputs/predictions
+  manifests: outputs/manifests
+  diagnostics: outputs/diagnostics
+  reports: reports
+  plots: reports/plots
+  tables: reports/tables
+
+data:
+  hf_repo: taidng/UIT-ViQuAD2.0
+  # revision is pinned at download time and written to data/raw/source_manifest.json
+  revision: null
+  split_seed: 42
+  strict_train_ratio: 0.70
+  strict_val_ratio: 0.15
+  # remainder -> test_strict
+  n_distractors: 12
+  hard_negative_ratio: 0.5
+  scenario_seed: 42
+  negative_audit_size: 150
+  # profile caps (number of QA records sampled per strict split); null = all
+  profile: full
+  caps:
+    smoke: 20
+    pilot: 100
+    small: 1000
+    medium: 5000
+    full: null
+
+retrieval:
+  bm25:
+    top_n_cached: 32
+    tokenize: regex_fallback  # regex_fallback | underthesea
+    k1: 1.5
+    b: 0.75
+  dense:
+    model: intfloat/multilingual-e5-small
+    revision: null  # pinned at build time
+    batch_size: 32
+    max_length: 512
+    normalize: true
+    index_type: flat_ip
+    query_prefix: "query: "
+    passage_prefix: "passage: "
+  passage_per_search_action: 1
+  initial_bootstrap: bm25
+  bootstrap_passages: 1
+  optional_searches: 2
+
+reader:
+  base_model: FacebookAI/xlm-roberta-base
+  revision: null  # pinned at download time
+  max_length: 384
+  doc_stride: 128
+  batch_size: 4
+  grad_accum: 8
+  epochs: 2
+  lr: 0.00002
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  fp16: true
+  # SQuAD2-style postprocessing: answer is null when null_score - best_non_null > threshold
+  null_score_diff_threshold: 0.0
+  max_answer_length: 30
+
+reward:
+  correct_answer: 2.0
+  wrong_answer: -2.0
+  correct_abstain: 0.8
+  unnecessary_abstain: -1.0
+  bm25_cost: 0.10
+  dense_cost: 0.25
+  bootstrap_bm25_cost: 0.10
+  candidate_f1_threshold: 0.80
+  force_provenance: true
+  gamma: 1.0
+
+teacher:
+  mode: soft          # soft | hard
+  temperature: 0.5
+  max_states_per_question: 8
+  tie_order: [ANSWER, ABSTAIN, SEARCH_BM25, SEARCH_DENSE]
+  tie_tolerance: 1.0e-8
+
+action_space: [ANSWER, SEARCH_BM25, SEARCH_DENSE, ABSTAIN]
+
+laya:
+  model: convaiinnovations/laya-multilingual
+  revision: null
+  max_len: 768
+  head_max_len: 192
+  micro_batch: 1
+  grad_accum: 8
+  epochs: 3
+  seed: 42
+  freeze_encoder: false
+
+rl:
+  algorithm: reinforce
+  seed: 42
+  gamma: 1.0
+  hidden_dim: 128
+  lr: 0.0003
+  batch_episodes: 32
+  max_updates: 500
+  eval_every: 25
+  entropy_coef: 0.005
+  value_coef: 0.5
+  grad_clip: 1.0
+  early_stop_patience: 6
+  checkpoint_every: 25
+
+limits:
+  max_gpu_hours: 12
+  max_retries_per_stage: 2
+  max_hparam_trials: 8

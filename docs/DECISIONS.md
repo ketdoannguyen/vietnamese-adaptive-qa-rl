@@ -107,3 +107,85 @@ copies were removed.
 
 The flag is an automated heuristic; no human review was performed, and this is stated in
 the CSV, the report and the JSON alike.
+## D008 — P3 threshold selection, hard acceptance gate, profile scale, and bf16 training (2026-10-08)
+
+The first pilot reader was unusable and the pipeline reported success anyway. Two defects,
+reproducible from the cap-100 pilot artifacts:
+
+1. **Selection objective.** `src/qa/postprocess.sweep_threshold` sorted the 33-point grid by
+   `(-em_overall, -f1_overall, threshold)`. Overall EM/F1 score an impossible question against
+   an empty reference, so an always-null reader scores `em_overall` = the impossible share
+   (0.29 on val) and beats every answering threshold (<= 0.06); the sweep therefore selected
+   threshold -8.0 — the all-null row — in every run. SQuAD2 never uses overall EM to pick the
+   threshold (answerable and impossible metrics are reported separately), and
+   `03_EXPERIMENTS/01_METRICS_...md` §2 (line 30) says the two definitions must be reported
+   apart, not mixed. The docstring claimed the opposite; it now states the real rule and why
+   overall EM is invalid on an impossible-heavy val set.
+2. **Unenforced acceptance.** `src/pipeline/train_reader.acceptance` recorded
+   `non_empty_span_with_valid_offset: {passed: false, example: null}` and the run was still
+   registered SUCCEEDED, with its `reader_inference.json` frozen for P4. Spec 02 §10 makes
+   that check part of P3's acceptance.
+
+**Selection rule (feasible-first).** Among thresholds that satisfy §10's constraint (>= 1
+non-empty span with valid provenance at that threshold), `choose_best_threshold` now picks the
+highest `f1_answerable + no_answer_accuracy`; ties go to higher `em_answerable`, then to the
+lower threshold. A sweep in which no threshold answers raises and the run fails, instead of
+shipping an abstain-always reader. Sweep rows keep every per-threshold metric and gain two
+audit fields (`acceptance_constraint_met`, `selection_objective`); `reader_eval.json` gains
+`threshold_selection` (`objective`, `constraint`, `chosen_threshold`,
+`n_feasible_thresholds` of `n_thresholds`, `objective_only_threshold`, `constraint_binding`)
+and the CLI prints it, so both the constraint and whether it decided the pick are visible.
+`src/pipeline/train_correctness.py` (fold readers) shares `choose_best_threshold` and inherits
+the rule — including the raise; an infeasible fold sweep should be treated as a failed fold.
+A `SELECTION_FAILED` `reader_eval.json` with the sweep is kept as evidence in that case.
+
+**Hard acceptance gate.** `require_acceptance` raises before `reader_inference.json` is
+written when the span check fails; the exception lands in the existing FAILED path (registry
+FAILED, no frozen contract for a rejected reader), while `reader_eval.json` and the
+predictions parquet stay on disk as evidence.
+
+**Scale and epochs.** Pilot caps align with `06_PIPELINE_ORCHESTRATION_AND_RESUME.md` §3:
+`smoke: 20 -> 40`, `pilot: 100 -> 300` (`small`/`medium`/`full` unchanged). Reader epochs scale
+per profile through the overlays — `configs/pilot.yaml` 30, `configs/medium.yaml` 3, base
+(full) 2 — because 300 questions at the full-profile default of 2 epochs give 6 optimizer
+steps. Regenerated pilot P1/P2 at cap 300: 300 scenarios/split, BM25 recall@1 0.9789, union
+recall@5 0.9984, unreachable 0.0033 — the data and retrieval are sound, so the weak reader is
+not a retrieval artifact.
+
+**bf16 training (pilot/medium).** The fp16 gate/training logs on this L4 carry `grad_norm:
+inf` (4 of 40 gate steps, and again in the 60-step run): the fp16 scaler reported inf gradients
+and skipped those steps. bf16 is native on Ada (D001) and needs no loss scaling: the same gate
+re-run under bf16 (`reader.bf16: true`) logged 0 inf in 40 steps, and the 270-step pilot run
+logged 0 inf. `reader.bf16: true` is set in the pilot/medium overlays only; base profiles keep
+`fp16: true` and inference keeps `src.qa.infer`'s fp16 autocast path (contract unchanged).
+
+**Measured before/after (pilot, val_strict: 212 answerable / 88 impossible):**
+
+| | before: cap 100, 2 epochs (104 windows, 6 steps) | after: cap 300, 30 epochs (316 windows, 270 steps, final loss 0.442, bf16) |
+|---|---|---|
+| selected threshold | -8.0 (all-null) | -8.0 |
+| answered answerable | 0 / 71 | 7 / 212 |
+| f1_answerable | 0.0 | 0.0113 |
+| no_answer_accuracy | 1.0 | 0.9659 |
+| acceptance | span check passed=false, run SUCCEEDED | 4/4 checks pass, run SUCCEEDED |
+
+A 20-epoch overlay run at cap 100 (60 steps) already showed the grid *can* answer — at 8.0 all
+71 answerable questions were answered (f1_answerable 0.113, no_answer_accuracy 0.035) — while
+the `em_overall` sort still picked the all-null row: the selection bug alone hid it.
+
+**Honest outcome at pilot scale.** Threshold -8.0 is also the objective's own argmax
+(`constraint_binding: false`): with these predictions `no_answer_accuracy` spans 0.97 -> 0.01
+while `f1_answerable` never exceeds 0.1604, so any sum of the two rewards abstention. The
+reason is visible in the margins: answerable (median -2.51, IQR -4.88..+0.33) and impossible
+(median -2.87, IQR -5.19..-0.02) overlap almost completely — this reader has learned no
+null/answer discrimination (at 0.0 it answers 151/212 answerable but also 66/88 impossible).
+The plumbing is now honest and the checks pass truthfully, but reader quality at pilot scale is
+the open problem, and the objective is structurally abstention-biased whenever `f1_answerable`
+is small. A follow-up decision should either constrain the selection (e.g. a minimum answer
+rate or a false-answer budget) or improve the reader's training — not let the raw sum decide.
+Nothing was retuned to make the numbers look better: the grid is base.yaml's, unchanged.
+
+**Tests.** `tests/test_reader.py` + `tests/test_reader_pipeline.py` cover: a null-spam row
+cannot win a feasible sweep, a binding constraint is flagged, an infeasible sweep fails the
+run, and the hard gate raises and withholds the contract. Committed subset: 152 passed,
+1 skipped.

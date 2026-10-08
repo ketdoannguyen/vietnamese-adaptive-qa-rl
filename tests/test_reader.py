@@ -13,7 +13,8 @@ import pytest
 
 from src.qa.features import build_feature_set, build_pair_features
 from src.qa.postprocess import (NO_SPAN_SCORE, apply_threshold, best_prediction_per_question,
-                                choose_best_threshold, decode_windows, sweep_threshold)
+                                choose_best_threshold, decode_windows, selection_report,
+                                sweep_threshold)
 from src.qa.reader import ReaderPrediction, verify_provenance
 from src.qa.reader_eval import evaluate_predictions, gold_index, threshold_grid
 from src.qa.train_reader import (load_tokenizer, overfit_smoke, reader_model_hash,
@@ -220,7 +221,7 @@ def test_gold_index_keeps_only_what_metrics_may_see():
     assert index == {"q": {"answer_texts": ["x"], "is_impossible": False}}
 
 
-def test_sweep_picks_the_threshold_with_the_best_overall_em(tokenizer):
+def test_sweep_marks_feasible_thresholds_and_selects_below_the_margin(tokenizer):
     features, metas = build_pair_features(
         QUESTION, CONTEXT, tokenizer, qid="a1", doc_id="d1", answer_texts=[ANSWER],
         answer_starts=[ANSWER_START], max_length=128, doc_stride=32)
@@ -233,10 +234,59 @@ def test_sweep_picks_the_threshold_with_the_best_overall_em(tokenizer):
     sweep = sweep_threshold(spans, gold, threshold_grid(-4.0, 4.0, 0.5),
                             reader_model_hash="sha", context_by_doc=contexts,
                             evaluate=evaluate_predictions)
+    # The margin is -2: every threshold below it abstains, so only those are feasible.
+    assert [row["threshold"] for row in sweep if not row["acceptance_constraint_met"]] == \
+        [-4.0, -3.5, -3.0, -2.5]
+    assert all("selection_objective" in row for row in sweep)
     best = choose_best_threshold(sweep)
-    assert best["em_overall"] == 1.0
-    assert best["threshold"] == -2.0  # the margin: below it the answer survives
-    assert sweep[0]["em_overall"] >= sweep[-1]["em_overall"]
+    assert best["threshold"] == -2.0  # all feasible rows tie: the lower threshold wins
+    assert best["em_overall"] == 1.0 and best["acceptance_constraint_met"] is True
+    assert sweep[0] == best  # sorted selection-first, so the artifact is self-explaining
+
+
+def _synthetic_row(threshold: float, **overrides) -> dict:
+    """A hand-made sweep row with the pilot's impossible share (29/100)."""
+    row = {"threshold": threshold, "answered_answerable": 0, "answered_impossible": 0,
+           "em_answerable": 0.0, "f1_answerable": 0.0, "no_answer_accuracy": 1.0,
+           "false_answer_rate": 0.0, "answer_rate_answerable": 0.0,
+           "em_overall": 0.29, "f1_overall": 0.29, "provenance_failures": 0,
+           "n": 100, "n_answerable": 71, "n_impossible": 29}
+    return {**row, **overrides}
+
+
+def test_null_spam_row_cannot_win_a_feasible_sweep():
+    """The pilot regression (D008): the all-null row had the best overall EM (0.29 > 0.01)."""
+    null_spam = _synthetic_row(-8.0)  # objective 1.0, but answers nothing
+    answers = _synthetic_row(6.0, answered_answerable=63, answered_impossible=22,
+                             f1_answerable=0.10, no_answer_accuracy=0.069, em_overall=0.01)
+    sweep = [null_spam, answers]  # deliberately unsorted: row order must not decide
+
+    best = choose_best_threshold(sweep)
+    assert best["threshold"] == 6.0 and best["f1_answerable"] == 0.10
+
+    report = selection_report(sweep)
+    assert report["constraint_binding"] is True  # the objective alone would pick -8.0
+    assert report["chosen_threshold"] == 6.0
+    assert report["objective_only_threshold"] == -8.0
+    assert report["n_feasible_thresholds"] == 1 and report["n_thresholds"] == 2
+
+
+def test_selection_prefers_the_objective_when_the_constraint_does_not_bind():
+    weak = _synthetic_row(4.0, answered_answerable=50, answered_impossible=25,
+                          f1_answerable=0.08, no_answer_accuracy=0.14)   # objective 0.22
+    strong = _synthetic_row(6.0, answered_answerable=63, answered_impossible=22,
+                            f1_answerable=0.10, no_answer_accuracy=0.24)  # objective 0.34
+    report = selection_report([weak, strong])
+    assert report["chosen_threshold"] == 6.0
+    assert report["constraint_binding"] is False
+
+
+def test_choose_best_threshold_fails_when_no_threshold_answers():
+    sweep = [_synthetic_row(-8.0), _synthetic_row(-7.5)]
+    with pytest.raises(ValueError, match="no threshold"):
+        choose_best_threshold(sweep)
+    with pytest.raises(ValueError, match="empty"):
+        choose_best_threshold([])
 
 
 # -------------------------------------------------------------------------- training

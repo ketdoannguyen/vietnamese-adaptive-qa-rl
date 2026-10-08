@@ -157,18 +157,19 @@ def train(*, model, tokenizer, rows: Sequence[Mapping[str, Any]], out_dir: str |
 
 def overfit_smoke(*, model, tokenizer, rows: Sequence[Mapping[str, Any]], out_dir: str | Path,
                   steps: int = 40, lr: float = 5e-5, batch_size: int = 4, seed: int = 42,
-                  fp16: bool = False) -> dict[str, Any]:
+                  fp16: bool = False, bf16: bool = False) -> dict[str, Any]:
     """The P3 acceptance gate: 32 examples must show a real loss decrease.
 
     If the loss does not fall here, the bug is in the data/feature path and RL must not
-    start (`03_...md` §8.2).
+    start (`03_...md` §8.2). ``fp16``/``bf16`` are mutually exclusive; the caller decides
+    (see ``use_bf16`` in the P3 pipeline).
     """
     if len(rows) < 32:
         raise ValueError(f"need 32 examples for the overfit gate, got {len(rows)}")
     subset = [dict(row) for row in rows[:32]]
     summary = train(model=model, tokenizer=tokenizer, rows=subset, out_dir=out_dir,
                     epochs=1, lr=lr, batch_size=batch_size, grad_accum=1, warmup_ratio=0.0,
-                    max_steps=steps, seed=seed, logging_steps=1, fp16=fp16)
+                    max_steps=steps, seed=seed, logging_steps=1, fp16=fp16, bf16=bf16)
     history = summary["loss_history"]
     first = history[0]["loss"] if history else None
     last = history[-1]["loss"] if history else None

@@ -9,7 +9,11 @@ must not start. It is also run automatically (once) before the real fine-tune un
 passing gate result already exists for the same config.
 
 Training data is ``train_strict`` only. The null threshold is swept on ``val_strict``, never
-on test. The reader is evaluated in two conditions, both reported:
+on test, and is chosen feasibility-first (§10: at least one non-empty span with valid
+provenance) and then by ``f1_answerable + no_answer_accuracy`` — overall EM cannot decide it,
+because on an impossible-heavy val set the always-null threshold wins it (D008). A sweep with
+no feasible point fails the run instead of freezing an abstain-always reader. The reader is
+evaluated in two conditions, both reported:
 
 * **oracle-context** — the reader is given the gold passage (answerable) or the source passage
   in which the answer is absent (impossible);
@@ -25,7 +29,8 @@ Artifacts (all under ``outputs/models/qa_reader/`` unless noted, registered in
 * ``overfit_smoke.json`` — the gate result
 * ``reader_inference.json`` — the frozen inference contract (threshold + hashes) that the QA
   state cache and the RL environment read
-* ``reader_eval.json`` — threshold sweep, oracle/retrieved metrics, acceptance checks
+* ``reader_eval.json`` — threshold sweep (per-row metrics + objective/constraint flags), the
+  selection audit, oracle/retrieved metrics, acceptance checks
 * ``reader_predictions_val.parquet`` — per (condition, qid, doc) decoded candidates
 """
 
@@ -36,11 +41,13 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import torch
+
 from src.data import artifacts
 from src.qa.features import build_feature_set
 from src.qa.infer import PairInput, ReaderInference, inference_config_sha, use_fp16
 from src.qa.postprocess import apply_threshold, best_prediction_per_question, \
-    choose_best_threshold, sweep_threshold
+    choose_best_threshold, selection_report, sweep_threshold
 from src.qa.reader_eval import evaluate_predictions, gold_index, threshold_grid
 from src.qa.train_reader import load_model, load_tokenizer, overfit_smoke, reader_model_hash, \
     save_model_card, tokenizer_hash, train
@@ -59,10 +66,22 @@ INFERENCE_FILE = "reader_inference.json"
 EVAL_FILE = "reader_eval.json"
 PREDICTIONS_FILE = "reader_predictions_val.parquet"
 CHECKSUMS_FILE = "checksums.json"
-#: The gate needs 32 windows; a profile cap of 20 questions cannot supply them, so the gate
+#: The gate needs 32 windows, which a smoke-scale cap cannot reliably supply, so the gate
 #: always sees at least this many train questions (still train_strict).
 GATE_MIN_QUESTIONS = 64
 CACHE_VERSION = "v1"
+
+
+def use_bf16(reader_cfg: Mapping[str, Any]) -> bool:
+    """bf16 for reader *training* when the profile asks for it on a CUDA device.
+
+    Mirrors :func:`src.qa.infer.use_fp16` (config opt-in + CUDA check) but applies to training
+    only: unlike fp16 it needs no loss scaling, so it cannot burn steps on inf/nan gradients
+    (measured on this L4: fp16 gate/training logs carry ``grad_norm: inf``). Inference keeps
+    the fp16 autocast path in :mod:`src.qa.infer`, so ``reader.fp16`` stays as the profile
+    set it for the eval/cache stages.
+    """
+    return bool(reader_cfg.get("bf16")) and torch.cuda.is_available()
 
 
 # ------------------------------------------------------------------------------ paths
@@ -186,11 +205,30 @@ def acceptance(metrics_oracle: Mapping[str, Any], spans: Mapping[tuple[str, str]
     }
 
 
+def require_acceptance(checks: Mapping[str, Any], *, threshold: float) -> None:
+    """D008 hard gate: a reader that never emits a span is a FAILED run, not a SUCCEEDED one.
+
+    `03_QA_READER_TRAINING_AND_CACHE.md` §10 requires at least one prediction with a
+    non-empty span and a valid source offset; before D008 the check was recorded as
+    ``passed: false`` while the run was still registered SUCCEEDED. Raising here (before
+    training is registered as an artifact) makes the registry record FAILED.
+    """
+    if not checks["non_empty_span_with_valid_offset"]["passed"]:
+        raise RuntimeError(
+            f"P3 acceptance failed: at the selected threshold {threshold} no val prediction "
+            "has a non-empty span with a valid source offset (`03_...md` §10) — the reader "
+            "would answer nothing, so the run must not be accepted (D008)")
+
+
 # -------------------------------------------------------------------------------- run
 
 def run(*, cfg: dict, profile: str, force: bool = False, overfit_smoke_only: bool = False,
         skip_gate: bool = False, registry: RunRegistry | None = None) -> dict[str, Any]:
     reader_cfg = cfg["reader"]
+    # Training precision: bf16 wins when the profile opts in (see use_bf16); fp16 and bf16
+    # are mutually exclusive in TrainingArguments. Inference precision is untouched.
+    train_bf16 = use_bf16(reader_cfg)
+    train_fp16 = use_fp16(reader_cfg) and not train_bf16
     out_dir = reader_dir(cfg)
     run_id = f"p3-reader-{profile}-{now_iso().replace(':', '')}"
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
@@ -220,7 +258,7 @@ def run(*, cfg: dict, profile: str, force: bool = False, overfit_smoke_only: boo
             gate_summary = overfit_smoke(model=model, tokenizer=tokenizer,
                                          rows=gate_features.rows(), out_dir=gate_dir(cfg),
                                          steps=40, lr=5e-5, batch_size=4,
-                                         fp16=use_fp16(reader_cfg))
+                                         fp16=train_fp16, bf16=train_bf16)
             gate_summary["path"] = str(gate_path)
             gate_summary["profile"] = profile
             atomic_write_json(gate_path, gate_summary)
@@ -247,7 +285,7 @@ def run(*, cfg: dict, profile: str, force: bool = False, overfit_smoke_only: boo
                               grad_accum=int(reader_cfg["grad_accum"]),
                               warmup_ratio=float(reader_cfg["warmup_ratio"]),
                               weight_decay=float(reader_cfg["weight_decay"]),
-                              fp16=use_fp16(reader_cfg),
+                              fp16=train_fp16, bf16=train_bf16,
                               seed=int(cfg["data"]["scenario_seed"]))
         train_summary.update({"base_model": base_model, "base_model_commit": commit,
                               "profile": profile, "train_rows": len(train_rows),
@@ -305,8 +343,19 @@ def _evaluate(cfg: dict, *, profile: str, out_dir: Path, model_hash: str, tokeni
                                            float(grid["step"])),
                             reader_model_hash=model_hash, context_by_doc=oracle_contexts,
                             evaluate=evaluate_predictions)
-    best = choose_best_threshold(sweep)
+    try:
+        best = choose_best_threshold(sweep)
+    except ValueError as exc:
+        # Unsatisfiable sweep (no threshold answers anything): the sweep is the evidence for
+        # the failure, so keep it on disk. reader_inference.json is written last and is
+        # therefore absent, so no downstream stage can consume this reader.
+        atomic_write_json(out_dir / EVAL_FILE, {
+            "status": "SELECTION_FAILED", "reason": str(exc),
+            "reader_model_hash": model_hash, "tokenizer_sha": tokenizer_sha,
+            "threshold_sweep": sweep, "profile": profile, **dict(extra)})
+        raise
     threshold = float(best["threshold"])
+    selection = selection_report(sweep)
 
     rows = prediction_rows(oracle_spans, condition="oracle_context", threshold=threshold,
                            model_hash=model_hash, context_by_doc=oracle_contexts)
@@ -323,6 +372,28 @@ def _evaluate(cfg: dict, *, profile: str, out_dir: Path, model_hash: str, tokeni
         retrieved_metrics = {"status": "NOT_RUN", "reason": not_run}
 
     paths = [out_dir / INFERENCE_FILE, out_dir / EVAL_FILE, out_dir / PREDICTIONS_FILE]
+    predictions_meta = write_parquet(out_dir / PREDICTIONS_FILE, rows)
+    checks = acceptance(best, oracle_spans, val_rows, threshold=threshold,
+                        model_hash=model_hash, context_by_doc=oracle_contexts,
+                        gate=gate_summary)
+    evaluation = {
+        "reader_model_hash": model_hash, "tokenizer_sha": tokenizer_sha,
+        "null_score_diff_threshold": threshold,
+        "threshold_sweep": sweep,
+        "threshold_selection": selection,
+        "oracle_context": best,
+        "retrieved_context": retrieved_metrics,
+        "acceptance": checks,
+        "val_rows": len(val_rows), "val_dropped_rows": dropped,
+        "predictions": predictions_meta, "library_versions": capture_library_versions(),
+        "paths": paths,
+        **dict(extra),
+    }
+    atomic_write_json(out_dir / EVAL_FILE, {k: v for k, v in evaluation.items()
+                                            if k != "paths"})
+    require_acceptance(checks, threshold=threshold)
+    # The frozen contract is written only after the acceptance gate, so a rejected reader
+    # never leaves a reader_inference.json for P4 to consume.
     atomic_write_json(out_dir / INFERENCE_FILE, {
         "reader_model_hash": model_hash, "tokenizer_sha": tokenizer_sha,
         "null_score_diff_threshold": threshold,
@@ -333,23 +404,6 @@ def _evaluate(cfg: dict, *, profile: str, out_dir: Path, model_hash: str, tokeni
         "profile": profile,
         "tuned_on": "val_strict", "sweep_points": len(sweep),
     })
-    predictions_meta = write_parquet(out_dir / PREDICTIONS_FILE, rows)
-    evaluation = {
-        "reader_model_hash": model_hash, "tokenizer_sha": tokenizer_sha,
-        "null_score_diff_threshold": threshold,
-        "threshold_sweep": sweep,
-        "oracle_context": best,
-        "retrieved_context": retrieved_metrics,
-        "acceptance": acceptance(best, oracle_spans, val_rows, threshold=threshold,
-                                 model_hash=model_hash, context_by_doc=oracle_contexts,
-                                 gate=gate_summary),
-        "val_rows": len(val_rows), "val_dropped_rows": dropped,
-        "predictions": predictions_meta, "library_versions": capture_library_versions(),
-        "paths": paths,
-        **dict(extra),
-    }
-    atomic_write_json(out_dir / EVAL_FILE, {k: v for k, v in evaluation.items()
-                                            if k != "paths"})
     return evaluation
 
 
@@ -395,10 +449,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  train: {summary['train']['examples']} windows, final loss "
           f"{summary['train']['final_loss']}")
     print(f"  threshold {evaluation['null_score_diff_threshold']}: "
-          f"EM(answerable)={oracle['em_answerable']:.4f} F1={oracle['f1_answerable']:.4f} "
+          f"answered(answerable)={oracle['answered_answerable']}/{oracle['n_answerable']} "
+          f"F1(answerable)={oracle['f1_answerable']:.4f} "
           f"no-answer acc={oracle['no_answer_accuracy']:.4f} "
           f"false-answer rate={oracle['false_answer_rate']:.4f} "
+          f"EM(answerable)={oracle['em_answerable']:.4f} "
           f"EM(overall)={oracle['em_overall']:.4f}")
+    selection = evaluation["threshold_selection"]
+    print(f"  selection: {selection['objective']}; feasible thresholds "
+          f"{selection['n_feasible_thresholds']}/{selection['n_thresholds']} "
+          f"(constraint_binding={selection['constraint_binding']}, "
+          f"objective-only best {selection['objective_only_threshold']})")
     retrieved = evaluation["retrieved_context"]
     print(f"  retrieved-context: " + (
         f"EM(overall)={retrieved['em_overall']:.4f} EM(answerable)={retrieved['em_answerable']:.4f}"

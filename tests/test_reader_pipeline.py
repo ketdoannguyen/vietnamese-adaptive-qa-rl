@@ -179,9 +179,16 @@ def test_reader_run_end_to_end(cfg):
 
     evaluation = read_json(out_dir / "reader_eval.json")
     assert [row["threshold"] for row in evaluation["threshold_sweep"]] == [8.0]
+    selection = evaluation["threshold_selection"]
+    assert selection["chosen_threshold"] == 8.0
+    assert selection["n_feasible_thresholds"] == 1 and selection["n_thresholds"] == 1
+    assert selection["constraint_binding"] is False  # the single point satisfies §10
     oracle = evaluation["oracle_context"]
     assert oracle["n"] == VAL_N
     assert oracle["n_impossible"] == VAL_N // IMPOSSIBLE_EVERY
+    assert oracle["acceptance_constraint_met"] is True
+    assert oracle["selection_objective"] == pytest.approx(
+        oracle["f1_answerable"] + oracle["no_answer_accuracy"])
     assert evaluation["retrieved_context"]["status"] == "NOT_RUN"
     assert "build_retrieval" in evaluation["retrieved_context"]["reason"]
     assert evaluation["acceptance"]["val_metrics_saved"]["passed"] is True
@@ -310,6 +317,51 @@ def test_acceptance_checks_are_truthful(cfg):
                                      context_by_doc=docs, gate=None)
     assert checks["non_empty_span_with_valid_offset"]["passed"] is False
     assert checks["overfit_loss_decreased"] is None
+
+
+def test_acceptance_gate_fails_the_run_and_withholds_the_contract(cfg, monkeypatch):
+    """D008: an acceptance check that fails must FAIL the run — not be recorded and ignored."""
+    seen = {}
+
+    def failing_checks(metrics_oracle, spans, rows, **kwargs):
+        seen["threshold"] = kwargs["threshold"]
+        return {"overfit_loss_decreased": None,
+                "overfit_smoke": {"path": None, "loss_first": None, "loss_last": None},
+                "non_empty_span_with_valid_offset": {"passed": False, "example": None},
+                "impossible_returns_null": {"passed": True, "n_null_on_impossible": 1,
+                                            "example_qid": "q"},
+                "val_metrics_saved": {"passed": True, "n_val_questions": int(metrics_oracle["n"])}}
+
+    monkeypatch.setattr(train_reader, "acceptance", failing_checks)
+    with pytest.raises(RuntimeError, match="P3 acceptance failed"):
+        _reader_run(cfg, skip_gate=True)
+    out_dir = train_reader.reader_dir(cfg)
+    assert seen["threshold"] == 8.0
+    # The evidence stays on disk, but the frozen contract does not: nothing may consume it.
+    assert (out_dir / train_reader.EVAL_FILE).exists()
+    assert not (out_dir / train_reader.INFERENCE_FILE).exists()
+    assert [row["status"] for row in read_jsonl(_registry(cfg).path)] == ["RUNNING", "FAILED"]
+
+
+def test_require_acceptance_is_a_hard_gate():
+    checks = {"non_empty_span_with_valid_offset": {"passed": False, "example": None}}
+    with pytest.raises(RuntimeError, match="acceptance failed"):
+        train_reader.require_acceptance(checks, threshold=-8.0)
+    train_reader.require_acceptance(
+        {"non_empty_span_with_valid_offset": {"passed": True, "example": None}}, threshold=0.0)
+
+
+def test_sweep_without_a_feasible_threshold_fails_the_run(cfg):
+    """D2: no threshold emits a span -> the selection raises and the run is FAILED."""
+    cfg["reader"]["threshold_sweep"] = {"start": -50.0, "stop": -50.0, "step": 1.0}
+    with pytest.raises(ValueError, match="no threshold"):
+        _reader_run(cfg, skip_gate=True)
+    out_dir = train_reader.reader_dir(cfg)
+    assert not (out_dir / train_reader.INFERENCE_FILE).exists()
+    evaluation = read_json(out_dir / train_reader.EVAL_FILE)
+    assert evaluation["status"] == "SELECTION_FAILED"
+    assert evaluation["threshold_sweep"][0]["acceptance_constraint_met"] is False
+    assert [row["status"] for row in read_jsonl(_registry(cfg).path)] == ["RUNNING", "FAILED"]
 
 
 def test_gate_questions_come_from_train_strict(cfg):

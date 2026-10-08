@@ -1,6 +1,16 @@
-# Profile overlay: 100-question pilot — the first profile whose numbers may be reported
-# (clearly labelled as pilot scale). Only the data cap changes here; corpus/retrieval/
-# reward/training knobs stay identical to every other profile so stages remain comparable.
+# Profile overlay: 300-question pilot (`06_PIPELINE_ORCHESTRATION_AND_RESUME.md` §3, aligned
+# by D008) — the first profile whose numbers may be reported (clearly labelled as pilot
+# scale). Data cap and the reader-training knobs below are the only deviations; corpus/
+# retrieval/reward knobs stay identical to every other profile so stages remain comparable.
 
 data:
   profile: pilot
+
+reader:
+  # 300 questions are ~6x fewer than the 2-epoch default was sized for: scale the reader's
+  # passes with the profile (D008).
+  epochs: 30
+  # The pilot reader trains in bf16: the L4 is Ada (bf16 native) and the fp16 run wasted
+  # steps on inf gradients (`grad_norm: inf` in the gate and training logs, D008). Inference
+  # keeps the fp16 autocast path from base.yaml.
+  bf16: true

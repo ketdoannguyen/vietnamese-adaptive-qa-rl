@@ -141,8 +141,20 @@ def sweep_threshold(spans: Mapping[tuple[str, str], BestSpan], gold: Mapping[str
     candidate that survived the threshold becomes that question's prediction
     (:func:`best_prediction_per_question`). ``evaluate`` is
     :func:`src.qa.reader_eval.evaluate_predictions`, injected to keep this module free of
-    metric policy. The objective is overall EM, then overall F1 — the standard SQuAD2
-    tie-break.
+    metric policy.
+
+    Rows keep every per-threshold metric plus two derived audit fields
+    (:func:`acceptance_constraint_met`, :func:`threshold_objective`) and are sorted by
+    :func:`selection_key`, so ``sweep[0]`` is the row the selection rule picks.
+
+    Overall EM/F1 are deliberately **not** the selection objective: they are computed with
+    an empty reference for impossible questions, so on a dataset with a large impossible
+    share an always-null reader scores ``em_overall`` equal to that share and beats any
+    answering threshold (a real pilot sweep was decided by the all-null row at the bottom of
+    the grid). Selection follows D008 instead — feasibility first (>=1 non-empty span with
+    valid provenance, `02_IMPLEMENTATION/03_QA_READER_TRAINING_AND_CACHE.md` §10), then
+    ``f1_answerable + no_answer_accuracy``, then ``em_answerable``, then the lower threshold.
+    Per-row metrics are kept as-is so both the constraint and the objective stay auditable.
     """
     rows = []
     for threshold in thresholds:
@@ -150,15 +162,84 @@ def sweep_threshold(spans: Mapping[tuple[str, str], BestSpan], gold: Mapping[str
                                       reader_model_hash=reader_model_hash,
                                       context_by_doc=context_by_doc)
         metrics = evaluate(best_prediction_per_question(predictions.values()), gold)
-        rows.append({"threshold": float(threshold), **metrics})
-    rows.sort(key=lambda row: (-row["em_overall"], -row["f1_overall"], row["threshold"]))
+        row = {"threshold": float(threshold), **metrics}
+        row["acceptance_constraint_met"] = acceptance_constraint_met(row)
+        row["selection_objective"] = threshold_objective(row)
+        rows.append(row)
+    rows.sort(key=selection_key)
     return rows
 
 
+def acceptance_constraint_met(row: Mapping) -> bool:
+    """§10's acceptance requirement, per threshold: at least one non-empty span with valid
+    provenance on the val predictions.
+
+    ``answered_*`` come from :func:`src.qa.reader_eval.evaluate_predictions` (a question
+    counts as answered when the threshold left a non-null span), and ``provenance_failures``
+    are subtracted so the count stays correct if a caller passes unverified predictions.
+    """
+    answered = int(row["answered_answerable"]) + int(row["answered_impossible"])
+    return answered - int(row.get("provenance_failures", 0)) >= 1
+
+
+def threshold_objective(row: Mapping) -> float:
+    """D008 selection objective: ``f1_answerable + no_answer_accuracy``.
+
+    The two terms live on disjoint question sets (answerable / impossible), so abstaining on
+    one side cannot inflate the other; the constraint above is still needed because an
+    always-null reader trivially maximizes ``no_answer_accuracy`` at 1.0.
+    """
+    return float(row["f1_answerable"]) + float(row["no_answer_accuracy"])
+
+
+def selection_key(row: Mapping) -> tuple:
+    """D008 ordering: feasible thresholds first, then objective, EM, lower threshold."""
+    return (not acceptance_constraint_met(row), -threshold_objective(row),
+            -float(row["em_answerable"]), float(row["threshold"]))
+
+
 def choose_best_threshold(sweep: Sequence[Mapping]) -> dict:
+    """Best row of a threshold sweep under :func:`selection_key`.
+
+    Raises ``ValueError`` when no threshold emits a non-empty span with valid provenance:
+    the reader answers nothing at every point of the grid, P3's acceptance check cannot be
+    met, and shipping the always-null row would silently freeze a reader that abstains
+    always (D008).
+    """
     if not sweep:
         raise ValueError("empty threshold sweep")
-    return dict(sweep[0])
+    best = dict(min(sweep, key=selection_key))
+    if not acceptance_constraint_met(best):
+        thresholds = [float(row["threshold"]) for row in sweep]
+        raise ValueError(
+            f"no threshold in {min(thresholds)}..{max(thresholds)} ({len(sweep)} points) emits "
+            f"a non-empty span with valid provenance on val: the reader abstains at every "
+            f"point (best objective {threshold_objective(best):.4f}), so the §10 acceptance "
+            "check cannot pass and the run must fail (D008)")
+    return best
+
+
+def selection_report(sweep: Sequence[Mapping]) -> dict:
+    """Audit record of the selection decision, stored next to the sweep in ``reader_eval.json``.
+
+    ``constraint_binding`` is true when the row the objective alone would pick fails the
+    acceptance constraint, so the constraint — not the objective — decided the threshold.
+    """
+    chosen = choose_best_threshold(sweep)
+    objective_only = min(sweep, key=lambda row: (-threshold_objective(row),
+                                                 -float(row["em_answerable"]),
+                                                 float(row["threshold"])))
+    return {
+        "objective": "f1_answerable + no_answer_accuracy",
+        "constraint": "at least one non-empty span with valid provenance at the chosen "
+                      "threshold (03_QA_READER_TRAINING_AND_CACHE.md §10)",
+        "chosen_threshold": float(chosen["threshold"]),
+        "chosen_objective": threshold_objective(chosen),
+        "n_thresholds": len(sweep),
+        "n_feasible_thresholds": sum(1 for row in sweep if acceptance_constraint_met(row)),
+        "objective_only_threshold": float(objective_only["threshold"]),
+        "constraint_binding": not acceptance_constraint_met(objective_only),
+    }
 
 
 def best_prediction_per_question(predictions: Iterable[ReaderPrediction]) -> dict[str, ReaderPrediction]:
@@ -177,5 +258,6 @@ def best_prediction_per_question(predictions: Iterable[ReaderPrediction]) -> dic
 
 
 __all__ = ["BestSpan", "best_span_in_window", "decode_windows", "apply_threshold",
-           "sweep_threshold", "choose_best_threshold", "best_prediction_per_question",
-           "NULL_PREDICTION"]
+           "sweep_threshold", "choose_best_threshold", "selection_report",
+           "acceptance_constraint_met", "threshold_objective", "selection_key",
+           "best_prediction_per_question", "NULL_PREDICTION"]

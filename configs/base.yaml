@@ -40,8 +40,8 @@ data:
   # profile caps (number of QA records sampled per strict split); null = all
   profile: full
   caps:
-    smoke: 20
-    pilot: 100
+    smoke: 40
+    pilot: 300
     small: 1000
     medium: 5000
     full: null

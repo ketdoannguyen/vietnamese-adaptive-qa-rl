@@ -261,4 +261,4 @@ def test_entropy_bonus_changes_the_loss_sign_direction():
     loss_high, stats_high = reinforce_loss(episodes, net, trainer.scaler_t, high,
                                            device=torch.device("cpu"))
     assert stats_low["entropy"] == pytest.approx(stats_high["entropy"])
-    assert float(loss_high) < float(loss_low) + 1e-9
+    assert loss_high.detach().item() < loss_low.detach().item() + 1e-9

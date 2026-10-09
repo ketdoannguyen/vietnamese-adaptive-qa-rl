@@ -805,3 +805,41 @@ rollouts ≈1 h) the chain projects to ≈11–12 h, under the guardrail with a 
 2-epoch plan (D015) stands unchanged. This entry records the measured concurrent rates
 D018 promised; no decision changes. If a later measured stage pushes the projection past
 12 h, D015's epoch-reduction rule fires against whatever GPU work then remains.
+
+## D021 — P9 report carries the full training history, with loss figures (2026-10-09)
+
+**Requirement (user).** "Phải ghi lại toàn bộ quá trình training, kể cả hình ảnh loss các
+thứ, ghi lại hết và đưa vào report báo cáo" — every training run recorded, loss curves
+included, nothing dropped. This also closes the spec gap: `06_PROMPT_REPORT_AND_EXPORT`
+requires `reports/plots/*.png` and the template figure list names a reward curve, Pareto,
+risk–coverage, reliability diagram and action histogram — loss curves were the missing
+figure class for the two-stage training section.
+
+**What was added.**
+
+* `src/eval/reporting.py`: `parse_laya_losses` / `parse_reader_losses` (the two real log-line
+  grammars) and `write_training_loss_plots` → `reports/plots/laya_loss_curves.png` (loss vs
+  optimizer step, one line per captured log) and `reports/plots/reader_loss_curves.png`
+  (loss vs epoch). A log matching neither grammar, or holding fewer than two points, is
+  skipped: the figure shows exactly the runs whose loss history still exists on disk.
+* `src/pipeline/report.py`: Bảng 1b — one row per `run_id` of P3_reader/
+  P3_reader_overfit_smoke/P5_laya_train/P6_rl/B5_correctness (stage, profile, final row's
+  status, start/end UTC, minutes; a run still RUNNING is quoted to `now` and flagged ĐANG
+  CHẠY, never read as finished); Bảng 1c — loss-log inventory (file, trainer, point count,
+  step/epoch span, final and minimum loss); both figures embedded; `_plot_inventory`
+  extended to the eight plots. Figures are written in `run()` before the manifest so the
+  checksum inventory includes them.
+
+**Honest limits (by design).** The interrupted first CE attempt stays in the figure — "toàn
+bộ quá trình" includes it. Loss values are raw log lines, not smoothed or re-computed: the
+negative early-RLCD losses are genuine trainer output, not a parse bug. The deployed medium
+reader run never captured stdout, so it has no curve and the report says CHƯA TẠO instead of
+reconstructing anything.
+
+**Verification.** Preview built from the live logs (28 files scanned; Laya series: killed CE
+attempt 334 pts, CE-r2 238 pts live, RLCD-r2 178 pts live incl. negatives, profile_ce 5 pts;
+reader pilots 40/67/46 pts) — both PNGs inspected. Parsers unit-tested on verbatim log lines
+(HF-Trainer dicts, negative losses, `eval_loss` lines excluded); report test seeds a closed
+run, a live run and a log file, asserting the tally sentence, the measured minutes, the
+inventory row and the PNG on disk. Full suite EXIT=0: 361 passed, 1 skipped (was 359/1; +2
+tests). Ruff parity with HEAD on both files (15 pre-existing F541s, none new).

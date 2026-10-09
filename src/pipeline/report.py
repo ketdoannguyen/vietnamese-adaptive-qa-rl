@@ -573,12 +573,89 @@ def _failure_cases(sources: Sources, limit: int = 20) -> tuple[list[list[Any]], 
 def _plot_inventory(sources: Sources) -> list[list[Any]]:
     names = ("reward_learning_curve.png", "action_histogram.png",
              "answer_f1_vs_retrieval_cost.png", "risk_coverage.png", "retrieval_recall.png",
-             "correctness_reliability.png")
+             "correctness_reliability.png", "laya_loss_curves.png", "reader_loss_curves.png")
     rows = []
     for name in names:
         path = sources.plots / name
         rows.append([name, "có" if path.is_file() else "CHƯA TẠO",
                      str(path) if path.is_file() else None])
+    return rows
+
+
+#: Stages that train a model; the training-run history table covers exactly these.
+TRAINING_STAGES = ("P3_reader", "P3_reader_overfit_smoke", "P5_laya_train", "P6_rl",
+                   "B5_correctness")
+
+
+def _stamp(ts: Any) -> str | None:
+    try:
+        return _dt.datetime.fromisoformat(str(ts)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return None
+
+
+def _minutes(start: Any, end: Any) -> float | None:
+    try:
+        return round((_dt.datetime.fromisoformat(str(end))
+                      - _dt.datetime.fromisoformat(str(start))).total_seconds() / 60.0, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _training_runs_table(sources: Sources) -> list[list[Any]]:
+    """One row per recorded training run, grouped by ``run_id`` like :func:`_durations`.
+
+    Start is the first row (RUNNING), end the last row of the same ``run_id``. A run whose
+    last row is still RUNNING is quoted to ``sources.now`` and flagged — an unfinished run
+    must not read as completed.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in sources.registry:
+        if row.get("stage") in TRAINING_STAGES and row.get("profile") in (None, sources.profile):
+            groups.setdefault(str(row.get("run_id")), []).append(row)
+    rows = []
+    for run_id, group in groups.items():
+        first, last = group[0], group[-1]
+        running = last.get("status") == "RUNNING"
+        end = sources.now if running else last.get("ts")
+        rows.append([
+            run_id, first.get("stage"), first.get("profile"),
+            "ĐANG CHẠY (tính đến lúc sinh báo cáo)" if running else last.get("status"),
+            _stamp(first.get("ts")), None if running else _stamp(end),
+            _minutes(first.get("ts"), end),
+            last.get("error") or last.get("reason") or None,
+        ])
+    return rows
+
+
+def _training_logs(sources: Sources) -> dict[str, Path]:
+    """Every captured training stdout on disk (stem -> path), both run-log locations."""
+    logs: dict[str, Path] = {}
+    for directory in (resolve(sources.cfg, "runs") / "logs", REPO_ROOT / "logs"):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.log")):
+            logs.setdefault(path.stem, path)
+    return logs
+
+
+def _training_loss_table(logs: Mapping[str, Path]) -> list[list[Any]]:
+    """Loss points actually present in each log; a log with no loss line is omitted."""
+    rows = []
+    for label, path in logs.items():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        laya = reporting.parse_laya_losses(text)
+        reader = reporting.parse_reader_losses(text)
+        if laya:
+            kind, span = "Laya (step)", f"{laya[0][0]} → {laya[-1][0]}"
+            losses = [loss for _, loss in laya]
+        elif reader:
+            kind, span = "Reader (epoch)", f"{reader[0][0]:g} → {reader[-1][0]:g}"
+            losses = [loss for _, loss in reader]
+        else:
+            continue
+        rows.append([label + ".log", kind, len(losses), span,
+                     round(losses[-1], 4), round(min(losses), 4)])
     return rows
 
 
@@ -835,6 +912,46 @@ def render_report(sources: Sources, rows: Sequence[Mapping[str, Any]],
         "",
     ]
     lines += _table(["Giai đoạn", "Stage", "Trạng thái", "Giây (đo được)"], _durations(sources))
+    train_rows = _training_runs_table(sources)
+    loss_logs = _training_logs(sources)
+    loss_rows = _training_loss_table(loss_logs)
+    tally: dict[str, int] = {}
+    for row in train_rows:
+        tally[str(row[3])] = tally.get(str(row[3]), 0) + 1
+    lines += [
+        "",
+        f"**Bảng 1b — Nhật ký huấn luyện**: mỗi dòng là một `run_id` trong runs/index.jsonl của "
+        f"các stage train ({', '.join(TRAINING_STAGES)}); ‘Phút’ = dòng RUNNING đầu → dòng kết "
+        "thúc cuối của cùng run_id, run còn chạy đo đến lúc sinh báo cáo và đánh dấu ĐANG CHẠY. "
+        f"Tổng {len(train_rows)} lần chạy: "
+        + (", ".join(f"{key}={value}" for key, value in sorted(tally.items())) or "chưa có dòng nào")
+        + ".",
+        "",
+    ]
+    lines += _table(["Lần chạy (run_id)", "Stage", "Profile", "Trạng thái cuối",
+                     "Bắt đầu (UTC)", "Kết thúc (UTC)", "Phút", "Ghi chú"], train_rows)
+    lines += [
+        "",
+        f"**Bảng 1c — Log loss còn lưu**: {len(loss_rows)}/{len(loss_logs)} tệp log quét được "
+        "có dòng loss parse được (nguồn: outputs/runs/logs/ và logs/); log của lần chạy cũ "
+        "không còn stdout thì không xuất hiện — không suy diễn số thiếu:",
+        "",
+    ]
+    if loss_rows:
+        lines += _table(["Tệp log", "Trainer", "Số điểm", "Đầu → cuối", "Loss cuối", "Loss min"],
+                        loss_rows)
+    else:
+        lines.append("N/A — không tìm thấy log loss nào trên đĩa.")
+    for name, caption in (
+            ("laya_loss_curves.png",
+             "Hình 1b — loss P5 Laya theo optimizer step, mỗi đường là một log còn lưu"),
+            ("reader_loss_curves.png",
+             "Hình 1c — loss P3 Reader theo epoch, mỗi đường là một log còn lưu")):
+        path = sources.plots / name
+        lines += ["", f"**{caption}:**"
+                  + ("" if path.is_file() else " CHƯA TẠO — không có log loss nào parse được.")]
+        if path.is_file():
+            lines += ["", f"![{caption}](plots/{name})"]
     retrieval = sources.retrieval or {}
     oracle = (sources.reader_eval or {}).get("oracle_context") or {}
     retrieved = (sources.reader_eval or {}).get("retrieved_context") or {}
@@ -1491,6 +1608,9 @@ def run(*, cfg: Mapping[str, Any], profile: str, zip_handoff: bool = False,
     """Generate every report product; idempotent for a fixed ``now``."""
     now = now or now_iso()
     sources = load_sources(cfg, profile, now)
+    # Loss figures from the captured training logs; the manifest (reports/ tree) picks the
+    # PNGs up below, so they must exist before it is written.
+    reporting.write_training_loss_plots(cfg, logs=_training_logs(sources))
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
     run_id = f"p9-report-{profile}-{now.replace(':', '')}"
     registry.append(run_id=run_id, stage=STAGE, status="RUNNING", profile=profile)

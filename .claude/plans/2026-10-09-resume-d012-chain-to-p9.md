@@ -35,7 +35,8 @@
    headroom rule.
 7. **P7 eval_baselines val** → **cache_reader --splits test_strict** (data-only state cache,
    strictly after the step-5 freeze, D019) → **eval_baselines test** (single access, logged).
-8. **P9 report** — REPORT.md/txt, results.csv/json, model card, REPRODUCE, handoff, zip.
+8. **P9 report** — REPORT.md/txt, results.csv/json, model card, REPRODUCE, handoff, zip;
+   includes the full training history (Bảng 1b/1c per `run_id` + loss figures) per D021.
 
 ## Hard rules carried
 

@@ -278,6 +278,51 @@ def test_failure_cases_are_read_from_the_predictions_artifact(world):
     assert "trả lời câu không có đáp án" in text
 
 
+def test_training_log_parsers_extract_real_lines_and_ignore_others():
+    laya_log = ("Fetching 5 files: 100%|████| 5/5 [00:00<00:00, 1369.26it/s]\n"
+                "epoch 1/2 step 100 loss 1.3838\n"
+                "epoch 1/2 step 200 loss 0.0000\n"
+                "epoch 2/2 step 100 loss -0.5\n")
+    assert reporting.parse_laya_losses(laya_log) == [(100, 1.3838), (200, 0.0), (100, -0.5)]
+    reader_log = ("{'loss': '5.846', 'grad_norm': '5.815', 'learning_rate': '5e-05', "
+                  "'epoch': '0.125'}\n"
+                  "{'loss': '5.900', 'grad_norm': 'inf', 'learning_rate': '5e-05', "
+                  "'epoch': '0.25'}\n"
+                  "{'eval_loss': '5.500', 'epoch': '0.3'}\n")
+    # eval lines are not training loss, and a loss with no epoch is not a point
+    assert reporting.parse_reader_losses(reader_log) == [(0.125, 5.846), (0.25, 5.9)]
+
+
+def test_training_history_and_loss_figures_come_from_registry_and_logs(world):
+    cfg, root = world
+    write_registry(root, [
+        {"run_id": "p5-laya-ce-pilot-20261007", "stage": "P5_laya_train", "status": "RUNNING",
+         "ts": "2026-10-07T00:00:00+00:00", "profile": "pilot", "regime": "ce"},
+        {"run_id": "p5-laya-ce-pilot-20261007", "stage": "P5_laya_train", "status": "SUCCEEDED",
+         "ts": "2026-10-07T00:03:00+00:00", "profile": "pilot", "regime": "ce"},
+        {"run_id": "p6-rl-pilot-20261008", "stage": "P6_rl", "status": "RUNNING",
+         "ts": "2026-10-08T00:00:00+00:00", "profile": "pilot"},  # still training, no terminal row
+    ])
+    logs = root / "outputs" / "runs" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "p5_laya_ce_pilot.log").write_text(
+        "epoch 1/2 step 100 loss 1.3838\nepoch 1/2 step 200 loss 0.4000\n", encoding="utf-8")
+    run_report(cfg)
+    text = (root / "reports" / "REPORT.md").read_text(encoding="utf-8")
+    assert "**Bảng 1b — Nhật ký huấn luyện**" in text
+    assert ("Tổng 2 lần chạy: SUCCEEDED=1, ĐANG CHẠY (tính đến lúc sinh báo cáo)=1."
+            in text)
+    assert "p5-laya-ce-pilot-20261007" in text
+    assert "3.000000" in text  # measured walltime, RUNNING row to its terminal row
+    assert "0.000000" in text  # the still-RUNNING run is quoted to `now`, not to a fake end
+    assert "**Bảng 1c — Log loss còn lưu**: 1/1 tệp" in text and "p5_laya_ce_pilot.log" in text
+    assert "plots/laya_loss_curves.png" in text
+    assert (root / "reports" / "plots" / "laya_loss_curves.png").is_file()
+    # no reader log exists in this world: no reader curve is drawn and the report says so
+    assert not (root / "reports" / "plots" / "reader_loss_curves.png").exists()
+    assert "reader_loss_curves.png" in text and "CHƯA TẠO" in text
+
+
 def test_rerun_with_the_same_now_leaves_every_report_product_identical(world):
     cfg, root = world
     write_baseline_csv(root, "val", [measured_row("E06", "val_strict")])

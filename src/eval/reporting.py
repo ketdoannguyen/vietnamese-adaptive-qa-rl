@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -344,3 +345,92 @@ def write_plots(cfg: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
 
     return {"answer_f1_vs_retrieval_cost": scatter_path, "risk_coverage": risk_path,
             "retrieval_recall": recall_path}
+
+
+# ------------------------------------------------------------------- training history
+
+#: The Laya trainer's per-step log line, e.g. ``epoch 1/2 step 13000 loss 0.0009``.
+LAYA_LOSS_RE = re.compile(r"^epoch (\d+)/(\d+) step (\d+) loss (-?[\d.eE+]+)\s*$")
+#: HF Trainer's per-log-step dict from the reader stage, e.g.
+#: ``{'loss': '5.846', 'grad_norm': '5.815', 'learning_rate': '5e-05', 'epoch': '0.125'}``.
+READER_LOSS_RE = re.compile(r"\{'loss': '([\d.]+)'[^}]*'epoch': '([\d.]+)'\}")
+
+TRAINING_LOSS_PLOTS = {"laya": "laya_loss_curves.png", "reader": "reader_loss_curves.png"}
+
+
+def parse_laya_losses(text: str) -> list[tuple[int, float]]:
+    """``(step, loss)`` pairs from a captured Laya training log, in log order."""
+    out: list[tuple[int, float]] = []
+    for line in text.splitlines():
+        match = LAYA_LOSS_RE.match(line.strip())
+        if match:
+            out.append((int(match.group(3)), float(match.group(4))))
+    return out
+
+
+def parse_reader_losses(text: str) -> list[tuple[float, float]]:
+    """``(epoch, loss)`` pairs from a captured reader (HF Trainer) log, in log order."""
+    return [(float(m.group(2)), float(m.group(1))) for m in READER_LOSS_RE.finditer(text)]
+
+
+def write_training_loss_plots(cfg: Mapping[str, Any], *,
+                              logs: Mapping[str, Path]) -> dict[str, Path]:
+    """Loss curves for every captured training log; one line per log file.
+
+    Each log is parsed with both patterns and a log that matches neither is skipped, so the
+    figure shows exactly the runs whose loss history still exists on disk — a run whose
+    stdout was never captured stays absent instead of being drawn from anything else. Logs
+    with fewer than two points are skipped too: one point is not a curve.
+    """
+    laya: dict[str, list[tuple[int, float]]] = {}
+    reader: dict[str, list[tuple[float, float]]] = {}
+    for label, path in sorted(logs.items()):
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        series = parse_laya_losses(text)
+        if len(series) >= 2:
+            laya[label] = series
+        series = parse_reader_losses(text)
+        if len(series) >= 2:
+            reader[label] = series
+    if not laya and not reader:
+        return {}
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plots = _plot_target(cfg)
+    written: dict[str, Path] = {}
+    if laya:
+        path = plots / TRAINING_LOSS_PLOTS["laya"]
+        fig, ax = plt.subplots(figsize=(8.5, 5.0))
+        for label, series in laya.items():
+            ax.plot([step for step, _ in series], [loss for _, loss in series],
+                    linewidth=1.2, label=label)
+        ax.set_xlabel("optimizer step")
+        ax.set_ylabel("training loss (log line, not smoothed)")
+        ax.set_title("P5 Laya — captured training loss trên toàn bộ step đã ghi")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7, loc="best")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written["laya"] = path
+    if reader:
+        path = plots / TRAINING_LOSS_PLOTS["reader"]
+        fig, ax = plt.subplots(figsize=(8.5, 5.0))
+        for label, series in reader.items():
+            ax.plot([epoch for epoch, _ in series], [loss for _, loss in series],
+                    linewidth=1.2, label=label)
+        ax.set_xlabel("epoch (HF Trainer log step)")
+        ax.set_ylabel("training loss (log line, not smoothed)")
+        ax.set_title("P3 Reader — captured training loss trên toàn bộ log còn lưu")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7, loc="best")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written["reader"] = path
+    return written

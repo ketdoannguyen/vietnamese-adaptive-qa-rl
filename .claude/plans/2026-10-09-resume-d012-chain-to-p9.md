@@ -61,6 +61,13 @@
 Kết quả chính (mean_episode_reward, primary): **E06 B8_rl tốt nhất cả hai split** (val −0.4891,
 test −0.5026; E00 −0.7136/−0.7506). E07 SKIPPED trung thực (cần checkpoint regime `ce`).
 
+### Bổ sung sau COMPLETE (2026-10-09, D025)
+
+- Đường demo lần đầu chạy end-to-end: bug `_reader_contract` (trả file JSON thay vì thư mục
+  checkpoint) đã sửa + regression test; `configs/final_inference.yaml` (thiếu theo spec 07 §1)
+  đã tạo; acceptance 07 §7 chạy đủ 3 đúng + 3 từ chối + 1 vết thất bại thật — biên bản ở
+  `docs/DEMO_ACCEPTANCE.md`. Suite 364 passed/1 skipped.
+
 ## Hard rules carried
 
 - GPU stages: one process at a time was D001/D017; **superseded by D018 (user-authorized,

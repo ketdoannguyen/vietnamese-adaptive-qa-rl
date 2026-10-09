@@ -299,6 +299,16 @@ def test_missing_reader_contract_names_the_p3_stage(tmp_path):
         cli.open_session(cfg, corpus_jsonl=str(corpus))
 
 
+def test_reader_contract_returns_the_checkpoint_dir_not_the_json_file(tmp_path):
+    """The demo loads ReaderInference from the checkpoint *directory* (weights +
+    config.json): regression for the dir/file mix-up that only the real artifacts hit."""
+    cfg = _cfg_pointing_at(tmp_path)
+    reader_dir = _write_reader_contract(cfg)
+    got_dir, contract = cli._reader_contract(cfg)
+    assert got_dir == reader_dir  # not reader_dir/"reader_inference.json"
+    assert contract["reader_model_hash"] == "h"
+
+
 def test_policy_dir_accepts_the_spec_name_and_the_train_rl_name(tmp_path):
     cfg = _cfg_pointing_at(tmp_path)
     spec_dir = tmp_path / "models" / "policy_reinforce_best"

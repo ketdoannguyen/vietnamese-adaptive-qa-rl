@@ -934,3 +934,41 @@ medium → NOT_RUN, đúng theo dữ liệu registry nhưng dễ bị đọc sai
 (sẽ ghi lại dữ liệu và có thể đổi checksum đã niêm phong); dữ liệu download vẫn xuất hiện
 đầy đủ trong artifact manifest kèm sha256. Giới hạn hiển thị đã biết — giữ nguyên để báo
 cáo trung thành với registry.
+
+---
+
+## D025 — Sửa đường demo (bug thư mục checkpoint + config thiếu) và biên bản acceptance 07 §7 (2026-10-09)
+
+**a) `configs/final_inference.yaml` bị thiếu.** Spec 07 §1 và checklist acceptance (dòng 17
+liệt kê trong cây repo bắt buộc) yêu cầu file này; docstring của `src/inference/cli.py` cũng
+tham chiếu nó, nhưng file chưa bao giờ được tạo — lệnh demo chuẩn của spec không chạy được.
+Đã tạo: overlay trên base.yaml, `inference.decision_rule: policy` (policy P6 quyết định,
+không fallback về prior Laya thô), kèm ghi chú corpus demo = val_strict và cache laya riêng
+(`outputs/models/laya_probs_cache_demo`). Lệnh spec chạy được.
+
+**b) Bug `_reader_contract` trả file JSON thay vì thư mục checkpoint.** Trên artifact thật
+CLI chết ngay: `outputs/models/qa_reader/reader_inference.json is not a saved reader
+checkpoint`. Nguyên nhân: `read_contract` trả **đường dẫn file contract** còn
+`ReaderInference.load` cần **thư mục checkpoint** (weights + `config.json`; kiểm tra tại
+`src/qa/infer.py:81`). Lỗi tiềm ẩn vì tests cũ stub reader, chỉ chạm nhánh lỗi trước khi
+nạp reader thật. Sửa: trả `train_reader.reader_dir(cfg)` + regression test mới
+(`test_reader_contract_returns_the_checkpoint_dir_not_the_json_file`). Full suite EXIT=0:
+**364 passed, 1 skipped** (was 363/1); hai file sửa `All checks passed!` với ruff (repo vẫn
+giữ 90 style-only findings theo chính sách D019 — không đổi, không mới).
+
+**c) Acceptance 07 §7 chạy end-to-end lần đầu.** 3/3 ca dương trả lời đúng kèm trích dẫn;
+3/3 ca âm từ chối đúng thông điệp chuẩn (một ca ANSWER không bị mask — policy tự chọn
+ABSTAIN sát nút 0.385 vs 0.365, tái hiện đúng eval); **1 vết thất bại thật giữ nguyên**
+(#7 chọn span thời kỳ 1955–1976 thay vì gold "Thủ tướng" 1976+; EM=0, tái hiện đúng đáp án
+sai của P7 val — không cherry-pick). Biên bản đầy đủ + trích đoạn + bảng thời gian:
+`docs/DEMO_ACCEPTANCE.md`; bằng chứng thô `logs/demo_acceptance*` (không commit — logs/ bị
+ignore theo quy ước repo).
+
+**d) Latency đo được (số liệu cho câu hỏi production).** `setup_ms = 28094` một lần cho cả
+phiên (nạp toàn chuỗi + dựng dense bank 687 docs); mỗi câu **5.5–6.4 s**. Phân rã:
+`retrieval_ms` 5.4–5.7 s chi phối — đo tách cùng máy: `BM25Index.build`+`rank` = **0.11 s**,
+phần còn lại là **vòng đời E5 encoder** (nạp lúc encode + encode 1 truy vấn + unload
+≈ 4.7 s/câu thành thục, lần đầu 10.2 s; theo quy tắc nạp/xả phase để giữ headroom VRAM);
+reader 23–190 ms; policy 0.3–0.7 ms; laya 39–407 ms (run nguội) / 0 ms (cache hit). Chưa
+tối ưu có chủ đích (ngoài phạm vi acceptance); nếu cần latency thấp hơn, giữ encoder
+thường trú là việc đầu tiên — ghi lại để cân nhắc production.

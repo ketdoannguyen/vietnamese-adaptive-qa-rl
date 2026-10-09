@@ -44,6 +44,7 @@ from src.decision.laya_adapter import LayaAdapter
 from src.decision.laya_cache import LayaProbCache
 from src.decision.schema import ACTION_ORDER
 from src.decision.state_text import serialize_state, state_hash
+from src.pipeline import train_reader
 from src.pipeline import worlds as world_builder
 from src.pipeline.cache_reader import read_contract
 from src.qa.infer import PairInput, ReaderInference, use_fp16
@@ -394,14 +395,19 @@ def open_session(cfg: Mapping[str, Any], *, corpus_jsonl: str | None = None,
 
 
 def _reader_contract(cfg: Mapping[str, Any]) -> tuple[Path, dict[str, Any]]:
-    """The P3 contract (``reader_inference.json``); its absence names the producing stage."""
+    """The reader checkpoint dir and its P3 contract (``reader_inference.json``).
+
+    ``read_contract`` returns the *contract file* path; loading needs the checkpoint
+    directory that holds it (weights + config.json), so return that dir, not the JSON.
+    """
     try:
-        return read_contract(cfg)
+        _, contract = read_contract(cfg)
     except FileNotFoundError as exc:
         raise NotReadyError(
             f"{exc} — the reader checkpoint is produced by the P3 stage "
             "(python -m src.pipeline.train_reader); the demo never fakes an answer "
             "without a loaded reader") from exc
+    return train_reader.reader_dir(cfg), contract
 
 
 def _load_policy(policy_dir: Path) -> tuple[PolicyNet, FeatureScaler]:

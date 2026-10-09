@@ -787,3 +787,21 @@ cosmetic, no behavioural effect, out of scope for this batch.
 EXIT=0: 358 passed, 1 skipped, 359 collected across 22 files, including the two new
 regression tests above. The batch is committed locally as one commit (repo convention: local
 only, no push).
+
+## D020 — Concurrent Laya rates measured; guardrail re-checked with data (2026-10-09)
+
+**Measurement (240 s window, 03:45–03:49Z, both runs resident).** CE advanced 8,200 → 9,200
+steps — 0.250 s/step, +25 % over the 0.20 s/step solo rate D017 measured; RLCD advanced
+2,200 → 3,300 — 0.218 s/step. GPU hold 12,970 MiB used / 9,594 MiB free, utilisation
+89–97 %; D018 projected ≈12.5 GiB for the pair, actual ≈12.7 GiB.
+
+**Re-check (same accounting as D015/D017: summed invocation hours vs
+`limits.max_gpu_hours=12`).** Remaining Laya work: CE 59,986 steps ≈ 4.2 h, RLCD 65,886
+steps ≈ 4.0 h — ≈8.2 h summed versus ≈7.0 h if the same steps ran solo at the D017 rate.
+Concurrency costs ≈17 % more summed GPU-hours and saves ≈2.8 h wall-clock (both losses
+finish ≈4.2 h from this point instead of ≈7.0 h). Adding the pipeline's remaining GPU work
+at D017's numbers (cache_laya ×2 ≈1.2 h, B5 ≈0.45 h of refits plus the estimator, P7
+rollouts ≈1 h) the chain projects to ≈11–12 h, under the guardrail with a thin margin; the
+2-epoch plan (D015) stands unchanged. This entry records the measured concurrent rates
+D018 promised; no decision changes. If a later measured stage pushes the projection past
+12 h, D015's epoch-reduction rule fires against whatever GPU work then remains.

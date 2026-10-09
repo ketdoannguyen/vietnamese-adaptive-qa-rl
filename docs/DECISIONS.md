@@ -877,3 +877,60 @@ walltimes, dependencies) and `report.py` never wrote it — the file existed onl
 asserts telemetry floats and the per-regime N/A) and all-N/A render without diagnostics (and
 COMPUTE_AND_ENV.md in the manifest). Read-only real render checked against live repo
 artifacts. Full suite EXIT=0: 363 passed, 1 skipped (was 361/1). Ruff parity with HEAD.
+
+---
+
+## D023 — P6 song song làm hỏng archive: select_rl chặn, cách ly + rerun tuần tự (2026-10-09)
+
+**Chuyện gì xảy ra.** Ba seed P6 (42/43/44) được launch **song song** lúc 08:34:35–36Z.
+`train_rl` train vào một working dir dùng chung `outputs/models/rl_policy` và chỉ snapshot
+vào `outputs/models/rl_runs/{run_id}/` lúc kết thúc (`archive_run` → `shutil.copytree`);
+với ba process cùng ghi dir đó, mỗi snapshot chụp trạng thái của bất kỳ run nào đang giữ
+dir, và mọi eval trong-run đọc cùng `best/` — nên ba log in ra **cùng một**
+`val_reward=-0.3781` dù dừng ở updates khác nhau (350/300/375, best 200/150/225).
+
+**Phát hiện.** `select_rl` từ chối (exit 1) lúc 08:40Z: run …T083436+0000 (seed 44) mang
+`config.json` `seed: 42` ≠ registry seed 44, và cả ba archive có `policy.safetensors`
+**trùng byte** (root và `best/`; `last/` lệch 2:1). Guard từ chối chọn từ bằng chứng mâu
+thuẫn — đúng thiết kế.
+
+**Quy tắc bị vi phạm.** D018: "two runs never write the same output directory". Đây là lỗi
+phía launch (parallel hóa các seed CPU mà code được thiết kế chạy tuần tự — docstring của
+chính `archive_run` ghi rõ bản copy tồn tại "so later seed runs cannot overwrite it"); GPU
+headroom ở đây không liên quan. Dòng cron `--seed 42|43|44` là liệt kê lựa chọn, không
+phải chạy song song.
+
+**Khắc phục (số đo).**
+* Cách ly 3 archive vào `outputs/models/rl_runs_invalidated_2026-10-09/` kèm `README.md`
+  sinh tự động (hash từng file, seed mismatch — không gõ tay).
+* Registry: 3 row chú thích `SUPERSEDED` (status ngoài STATUSES như ghi chú `INTERRUPTED`
+  trước đó; `select_rl` bỏ qua status không terminal, và dir đã ra khỏi glob `rl_runs/*/`
+  — đó mới là cơ chế loại trừ thật).
+* Rerun 42→43→44 **tuần tự** (08:41:41, 08:43:18, 08:44:44Z; ≈2,5 phút/seed): val_reward
+  khác nhau thật — -0.3781 / **-0.3438** / -0.4531 — giải quyết triệt để hiện tượng giá
+  trị trùng.
+* `select_rl` (08:48:21Z): winner **seed 43** val_reward -0.3438; canonical
+  `outputs/models/rl_policy` đã swap sang winner — verify: sha256 canonical
+  `policy.safetensors` `ec32df9e352f…` == hash archive winner, `rl_config.json` canonical
+  seed 43. `best_selection.json` ghi cuối cùng, đúng thiết kế.
+
+**Chưa làm (có chủ đích):** để `train_rl` an toàn song song (working dir riêng per-run) là
+thay đổi code cần test; chi phí chạy tuần tự cả sweep chỉ ~8 phút nên serialize là cách
+đúng và rẻ hơn. Nếu lần sau sweep đủ lớn để cần parallel, thêm per-run work dir trước.
+
+## D024 — Hai ghi chú vận hành của lần sinh P9 đầu tiên (2026-10-09)
+
+**a) Lần chạy report đầu thiếu `--profile medium`.** Run `p9-report-full-…T091609` chạy không
+tham số nên lấy default `full` từ base.yaml; Bảng 1 tra registry theo profile “full” nên mọi
+stage medium hiển thị NOT_RUN. Đã chạy lại đúng `--profile medium --zip`
+(`p9-report-medium-…T091821`) — sản phẩm trong `reports/` là của lần chạy medium; row của
+lần sai đã được chú thích `SUPERSEDED` trong registry (status ngoài STATUSES, cùng cách xử
+lý như D023a). Bài học: mọi stage trong chuỗi đều cần `--profile medium` tường minh.
+
+**b) P1 download hiển thị NOT_RUN trong báo cáo medium.** Registry chỉ có row
+`p1-download-full-…T124343` SUCCEEDED (download chạy 2026-10-08, trước khi chuỗi chuyển sang
+profile medium; bước này độc lập profile). Bảng stage lọc theo profile nên không thấy row
+medium → NOT_RUN, đúng theo dữ liệu registry nhưng dễ bị đọc sai. Không chạy lại download
+(sẽ ghi lại dữ liệu và có thể đổi checksum đã niêm phong); dữ liệu download vẫn xuất hiện
+đầy đủ trong artifact manifest kèm sha256. Giới hạn hiển thị đã biết — giữ nguyên để báo
+cáo trung thành với registry.

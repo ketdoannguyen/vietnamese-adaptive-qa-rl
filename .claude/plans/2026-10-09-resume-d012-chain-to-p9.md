@@ -39,6 +39,28 @@
    handoff, zip; includes the full training history (Bảng 1b/1c per `run_id` + loss figures,
    D021), as-run Laya hyperparameters (Bảng 3b) and every measured resource (D022).
 
+## COMPLETE — kết thúc 2026-10-09T09:23Z
+
+1. ✓ `p3-reader-cache-medium-2026-10-09T002x` SUCCEEDED (train 65,786 states; về sau chạy thêm
+   `…T085245` cho test_strict, sau freeze).
+2. ✓ `make_teacher` medium SUCCEEDED.
+3. ✓ Laya CE ∥ RLCD (D018) SUCCEEDED — CE `…T004x`, RLCD `…T050x`; manifest + hash đã verify.
+4. ✓ `cache_laya` ce + rlcd SUCCEEDED (830.0/878.6 s và 1,044.1/718.6 s, per-regime dirs).
+5. ✓ P6 seed 42/43/44. **Deviation D023**: lần đầu chạy song song 3 seed → race trên canonical
+   dir (archives lẫn nhau); `select_rl` từ chối → cách ly 3 archive + 3 row SUPERSEDED, rerun
+   tuần tự (`…T084141/…T084318/…T084444`, val_reward −0.3781/−0.3438/−0.4531). `select_rl`
+   SUCCEEDED 08:48:21, winner seed 43, canonical hash `ec32df9e…` đã verify.
+6. ✓ B5 `train_correctness --oof-folds 3` SUCCEEDED (29 min; tau_answer 1.0, reward −0.8024).
+7. ✓ P7 val `…T084929` → cache_reader test `…T085245` → P7 test `…T085712` SUCCEEDED — một lần
+   mở test duy nhất, sau freeze (docs/TEST_ACCESS_LOG.md chứng minh thứ tự).
+8. ✓ P9 `p9-report-medium-2026-10-09T091821+0000` SUCCEEDED + `--zip`. **Deviation D024a**:
+   lần chạy đầu thiếu `--profile medium` (row đã chú thích SUPERSEDED); **D024b**: P1 download
+   hiển thị NOT_RUN theo profile (registry chỉ có row `full` từ 2026-10-08) — giữ nguyên có
+   chủ đích, dữ liệu vẫn đủ trong artifact manifest.
+
+Kết quả chính (mean_episode_reward, primary): **E06 B8_rl tốt nhất cả hai split** (val −0.4891,
+test −0.5026; E00 −0.7136/−0.7506). E07 SKIPPED trung thực (cần checkpoint regime `ce`).
+
 ## Hard rules carried
 
 - GPU stages: one process at a time was D001/D017; **superseded by D018 (user-authorized,

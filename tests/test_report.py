@@ -323,6 +323,50 @@ def test_training_history_and_loss_figures_come_from_registry_and_logs(world):
     assert "reader_loss_curves.png" in text and "CHƯA TẠO" in text
 
 
+def test_compute_and_env_renders_measured_hardware_telemetry_and_hyperparams(world):
+    cfg, root = world
+    write_json(root / "outputs" / "diagnostics" / "gpu_info.json", {
+        "gpus": [{"index": 0, "name": "NVIDIA L4", "memory_total_mib": 23034,
+                  "memory_free_mib": 22564, "driver_version": "580.178.04",
+                  "compute_cap": "8.9"}],
+        "torch": {"version": "2.14.1+cu130", "cuda_runtime": "13.0", "usable_bf16": True}})
+    write_json(root / "outputs" / "diagnostics" / "system_info.json", {
+        "hostname": "gpu-1", "kernel": "6.8.0", "python": "3.10.12",
+        "cpu_count": 4, "cpu_model": "Intel Xeon",
+        "memory_mib": {"MemTotal": 15990, "MemAvailable": 12582},
+        "disks": {"root": {"total_gb": 77.3, "free_gb": 50.3, "used_pct": 35.0}}})
+    write_json(root / "outputs" / "manifests" / "P5_train_laya_ce_pilot.json", {
+        "run_id": "p5-laya-ce-pilot-1", "regime": "ce", "loss": "soft-ce", "epochs": 2,
+        "seed": 42, "peak_vram_mib": 6179.1, "walltime_s": 15000.0,
+        "epoch_loss": [1.42, 0.31], "created_utc": "2026-10-07T01:00:00+00:00",
+        "config": {"encoder_lr": 2.5e-05, "grad_accum": 8},
+        "library_versions": {"python": "3.10.12", "torch": "2.14.1+cu130"}})
+    run_report(cfg)
+    env = (root / "reports" / "COMPUTE_AND_ENV.md").read_text(encoding="utf-8")
+    assert "NVIDIA L4" in env and "23034" in env and "580.178.04" in env
+    assert "Intel Xeon" in env and "15990" in env
+    # trainer telemetry, quoted as measured — not rounded away and not re-derived
+    assert "6179.100000" in env and "15000.000000" in env
+    assert "P5_train_laya_ce_pilot.json" in env and "p5-laya-ce-pilot-1" in env
+    text = (root / "reports" / "REPORT.md").read_text(encoding="utf-8")
+    # Bảng 3b: as-run hyperparameters; the missing rlcd manifest is N/A, not copied over
+    assert "**Bảng 3b — Hyperparameter" in text
+    assert "| encoder_lr | 0.000025 | N/A |" in text
+    assert "| grad_accum | 8 | N/A |" in text
+
+
+def test_compute_and_env_is_na_where_no_artifact_exists(world):
+    cfg, root = world
+    run_report(cfg)
+    env = (root / "reports" / "COMPUTE_AND_ENV.md").read_text(encoding="utf-8")
+    assert "N/A" in env
+    assert "gpu_info.json" in env and "P5_train_laya_*.json" in env  # paths looked for
+    text = (root / "reports" / "REPORT.md").read_text(encoding="utf-8")
+    assert "N/A — chưa có manifest huấn luyện Laya." in text
+    manifest = (root / "reports" / "artifact_manifest.sha256").read_text(encoding="utf-8")
+    assert "reports/COMPUTE_AND_ENV.md" in manifest  # checksummed like every other product
+
+
 def test_rerun_with_the_same_now_leaves_every_report_product_identical(world):
     cfg, root = world
     write_baseline_csv(root, "val", [measured_row("E06", "val_strict")])

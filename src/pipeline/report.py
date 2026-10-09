@@ -13,7 +13,8 @@ Written by this module (and nothing else in the repo):
   from the recorded rows, metrics ``N/A``/``null`` when missing, never 0.
 * ``reports/REPORT.md`` + ``reports/REPORT.txt`` — the Vietnamese report of
   ``05_TEMPLATES/02``, every table carrying N, split, seed and its source artifact path.
-* ``reports/MODEL_CARD.md`` (``05_TEMPLATES/04``), ``reports/REPRODUCE.md``,
+* ``reports/MODEL_CARD.md`` (``05_TEMPLATES/04``), ``reports/COMPUTE_AND_ENV.md``
+  (measured GPU/VRAM/peak memory/walltimes, same template), ``reports/REPRODUCE.md``,
   ``reports/FINAL_HANDOFF.md``, ``reports/artifact_manifest.sha256`` and
   ``docs/TEST_ACCESS_LOG.md`` (honest verdict — "KHÔNG THỂ CHỨNG MINH" when the artifacts
   cannot prove test access order).
@@ -50,6 +51,7 @@ REPORT_TXT = "REPORT.txt"
 RESULTS_CSV = "results.csv"
 RESULTS_JSON = "results.json"
 MODEL_CARD_MD = "MODEL_CARD.md"
+COMPUTE_ENV_MD = "COMPUTE_AND_ENV.md"
 REPRODUCE_MD = "REPRODUCE.md"
 MANIFEST_FILE = "artifact_manifest.sha256"
 HANDOFF_MD = "FINAL_HANDOFF.md"
@@ -530,6 +532,25 @@ def _laya_rows(sources: Sources) -> list[list[Any]]:
             "SUCCEEDED" if manifest else "NOT_RUN",
         ])
     return rows
+
+
+def _hyperparam_table(sources: Sources) -> list[list[Any]]:
+    """As-run hyperparameters of both Laya regimes, straight from their manifests.
+
+    The manifest ``config`` block records every knob the trainer actually resolved (including
+    overlay values from e.g. ``laya_budget_2ep.yaml``), so this table never shows a default
+    the run did not use. Keys are the union across the two regimes; a regime whose manifest
+    is missing renders ``N/A`` — a not-yet-run regime must not borrow the other's values.
+    """
+    configs = [(sources.stage_manifests.get(f"P5_train_laya_{regime}_{sources.profile}")
+                or {}).get("config") or {}
+               for regime in ("ce", "rlcd")]
+    keys: list[str] = []
+    for config in configs:
+        for key in config:
+            if key not in keys:
+                keys.append(key)
+    return [[key, configs[0].get(key), configs[1].get(key)] for key in keys]
 
 
 def _failure_cases(sources: Sources, limit: int = 20) -> tuple[list[list[Any]], str]:
@@ -1025,6 +1046,16 @@ def render_report(sources: Sources, rows: Sequence[Mapping[str, Any]],
     lines += _table(["Checkpoint", "Regime", "Loss", "Data SHA256", "Train N", "Calib N",
                      "Temperature", "Epoch loss", "Walltime (s)", "Peak VRAM (MiB)", "Status"],
                     _laya_rows(sources))
+    hp_rows = _hyperparam_table(sources)
+    lines += [
+        "",
+        f"**Bảng 3b — Hyperparameter đã chạy của 2 lần Laya** (nguồn: outputs/manifests/"
+        f"P5_train_laya_{{ce,rlcd}}_{sources.profile}.json, khối `config` as-run; hai regime "
+        "cùng điều kiện theo spec 04 §5):",
+        "",
+    ]
+    lines += (_table(["Thông số", "CE", "RLCD"], hp_rows) if hp_rows
+              else ["N/A — chưa có manifest huấn luyện Laya."])
     lines += [
         "",
         "**Bảng 4 — E00–E07 trên val_strict** (nguồn: reports/tables/baseline_results_val.csv; "
@@ -1213,6 +1244,97 @@ def markdown_to_plaintext(markdown: str) -> str:
             continue
         out.append(stripped)
     return "\n".join(out).rstrip() + "\n"
+
+
+def render_compute_and_env(sources: Sources) -> str:
+    """``reports/COMPUTE_AND_ENV.md`` — measured hardware, VRAM, walltimes (``05_TEMPLATES/04``).
+
+    Every row cites the artifact it came from; a missing artifact renders ``N/A`` with the
+    path that was looked for. Peak VRAM/walltime rows quote the trainer's own telemetry from
+    the stage manifests (``torch.cuda.max_memory_allocated``), not an estimate.
+    """
+    gpu_info = sources.gpu or {}
+    gpus = gpu_info.get("gpus") or []
+    gpu = gpus[0] if gpus else {}
+    torch_info = gpu_info.get("torch") or {}
+    system = sources.system or {}
+    memory = system.get("memory_mib") or {}
+    disk = (system.get("disks") or {}).get("root") or {}
+    manifests = sorted(sources.stage_manifests.values(),
+                       key=lambda item: str(item.get("created_utc") or ""))
+    latest = manifests[-1] if manifests else {}
+    versions = latest.get("library_versions") or {}
+    lines = [
+        "# COMPUTE_AND_ENV — tài nguyên đo được",
+        "",
+        "Nguồn: outputs/diagnostics/gpu_info.json, system_info.json, "
+        "outputs/manifests/P5_train_laya_*.json, runs/index.jsonl — không có số nào nhập tay; "
+        "thiếu artifact thì ghi N/A kèm đường dẫn đã tra.",
+        "",
+        "**Bảng C1 — Phần cứng và runtime (đo tại P0/P5):**",
+        "",
+    ]
+    lines += _table(["Mục", "Giá trị đo được", "Nguồn"], [
+        ["GPU", (f"{gpu.get('name')} ×{len(gpus)} (compute {gpu.get('compute_cap')}, driver "
+                 f"{gpu.get('driver_version')})") if gpus else None,
+         "outputs/diagnostics/gpu_info.json"],
+        ["VRAM tổng / trống lúc đo (MiB)",
+         " / ".join(str(value) for value in (gpu.get("memory_total_mib"),
+                                             gpu.get("memory_free_mib"))) if gpus else None,
+         "outputs/diagnostics/gpu_info.json"],
+        ["CUDA / PyTorch", (f"CUDA {torch_info.get('cuda_runtime')} / torch "
+                            f"{torch_info.get('version')}; bf16 khả dụng: "
+                            f"{torch_info.get('usable_bf16')}") if torch_info else None,
+         "outputs/diagnostics/gpu_info.json"],
+        ["CPU", f"{system.get('cpu_model')} ×{system.get('cpu_count')} lõi" if system else None,
+         "outputs/diagnostics/system_info.json"],
+        ["RAM tổng / khả dụng (MiB)",
+         " / ".join(str(value) for value in (memory.get("MemTotal"), memory.get("MemAvailable")))
+         if memory else None, "outputs/diagnostics/system_info.json"],
+        ["SSD (root)", (f"{disk.get('total_gb')} GB tổng / {disk.get('free_gb')} GB trống "
+                        f"({disk.get('used_pct')}% đã dùng)") if disk else None,
+         "outputs/diagnostics/system_info.json"],
+        ["Host / kernel / python",
+         " / ".join(str(value) for value in (system.get("hostname"), system.get("kernel"),
+                                             system.get("python"))) if system else None,
+         "outputs/diagnostics/system_info.json"],
+        [f"Thư viện huấn luyện (manifest mới nhất: {latest.get('run_id')})",
+         ", ".join(f"{key}={value}" for key, value in sorted(versions.items())) or None,
+         "outputs/manifests/P5_train_laya_*.json"],
+    ])
+    lines += [
+        "",
+        "**Bảng C2 — VRAM đỉnh và thời lượng do trainer tự đo (từng lần chạy Laya):**",
+        "",
+    ]
+    if sources.stage_manifests:
+        lines += _table(["Lần chạy (run_id)", "Regime", "Loss", "Epochs", "Seed",
+                         "Peak VRAM (MiB)", "Walltime (s)", "Loss epoch cuối", "Manifest"],
+                        [[manifest.get("run_id"), manifest.get("regime"), manifest.get("loss"),
+                          manifest.get("epochs"), manifest.get("seed"),
+                          manifest.get("peak_vram_mib"), manifest.get("walltime_s"),
+                          (list(manifest.get("epoch_loss") or []) or [None])[-1],
+                          f"outputs/manifests/{name}.json"]
+                         for name, manifest in sorted(sources.stage_manifests.items())])
+    else:
+        lines.append("N/A — không có outputs/manifests/P5_train_laya_*.json.")
+    lines += [
+        "",
+        "**Bảng C3 — Thời lượng từng stage (đo được: bản ghi RUNNING đầu → dòng kết thúc cuối "
+        "theo run_id trong runs/index.jsonl):**",
+        "",
+    ]
+    lines += _table(["Giai đoạn", "Stage", "Trạng thái", "Giây (đo được)"], _durations(sources))
+    lines += [
+        "",
+        "- Peak VRAM ở bảng C2 là số trainer tự đo trong tiến trình (allocated), thấp hơn mức "
+        "thiết bị giữ khi CE ∥ RLCD cùng resident — mức giữ thực tế của cặp đôi đã đo và ghi "
+        "trong docs/DECISIONS.md (D018/D020) cùng hạn mức 24 GiB.",
+        "- Thời gian theo từng lần chạy (kể cả smoke/bị ngắt) và hình loss: REPORT.md Bảng 1b/1c; "
+        "số phút train là walltime đo từ registry, không tính lại từ log.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def render_model_card(sources: Sources, rows: Sequence[Mapping[str, Any]]) -> str:
@@ -1633,9 +1755,12 @@ def run(*, cfg: Mapping[str, Any], profile: str, zip_handoff: bool = False,
         access_log.write_text(render_test_access_log(sources), encoding="utf-8")
         (sources.reports / HANDOFF_MD).write_text(
             render_handoff(sources, rows, sources.registry_sha), encoding="utf-8")
+        (sources.reports / COMPUTE_ENV_MD).write_text(render_compute_and_env(sources),
+                                                      encoding="utf-8")
         manifest = write_manifest(REPO_ROOT, sources.reports / MANIFEST_FILE)
         artifacts = [results_csv, results_json, report_md, sources.reports / REPORT_TXT,
-                     sources.reports / MODEL_CARD_MD, sources.reports / REPRODUCE_MD,
+                     sources.reports / MODEL_CARD_MD, sources.reports / COMPUTE_ENV_MD,
+                     sources.reports / REPRODUCE_MD,
                      access_log, sources.reports / HANDOFF_MD, manifest]
         zip_info: str | None = None
         if zip_handoff:
@@ -1659,7 +1784,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.pipeline.report",
         description="P9: generate REPORT.md/REPORT.txt, results.csv/json, MODEL_CARD.md, "
-                    "REPRODUCE.md, FINAL_HANDOFF.md and the artifact manifest from raw artifacts")
+                    "COMPUTE_AND_ENV.md, REPRODUCE.md, FINAL_HANDOFF.md and the artifact "
+                    "manifest from raw artifacts")
     add_profile_args(parser)
     parser.add_argument("--zip", action="store_true",
                         help="also write reports/handoff_metadata.zip (metadata only, "

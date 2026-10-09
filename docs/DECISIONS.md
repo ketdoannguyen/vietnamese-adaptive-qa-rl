@@ -843,3 +843,37 @@ reader pilots 40/67/46 pts) — both PNGs inspected. Parsers unit-tested on verb
 run, a live run and a log file, asserting the tally sentence, the measured minutes, the
 inventory row and the PNG on disk. Full suite EXIT=0: 361 passed, 1 skipped (was 359/1; +2
 tests). Ruff parity with HEAD on both files (15 pre-existing F541s, none new).
+
+## D022 — COMPUTE_AND_ENV.md + hyperparameter table: every measured resource recorded (2026-10-09)
+
+**Requirement (user).** "Khi xong hãy lưu lại toàn bộ các thông số hay kết quả, từ việc dùng
+bao GB, đến train bao phút, hyperparameter như nào, ghi lại đầy đủ." Audit against the spec
+found a real gap while closing it: `06_PROMPT_REPORT_AND_EXPORT` and the repository-tree
+checklist require `reports/COMPUTE_AND_ENV.md` (GPU name/actual 24 GB/free, peak memory,
+walltimes, dependencies) and `report.py` never wrote it — the file existed only in the spec.
+
+**What was added.**
+
+* `report.render_compute_and_env` → `reports/COMPUTE_AND_ENV.md`, three measured tables:
+  C1 hardware/runtime (GPU name × count, compute cap, driver, VRAM total/free as measured at
+  P0, CUDA/PyTorch/bf16, CPU, RAM, SSD, host/kernel/python, the newest manifest's
+  `library_versions` stack), C2 per-run trainer telemetry (peak VRAM MiB, walltime s,
+  final epoch loss — `torch.cuda.max_memory_allocated`, not an estimate), C3 per-stage
+  measured walltime (same run_id accounting as REPORT Bảng 1). Every row names its source
+  artifact; missing inputs render N/A with the path looked for. The file joins the manifest
+  checksums and the registry artifact list like every other product.
+* REPORT.md **Bảng 3b** — as-run hyperparameters of both Laya regimes as a CE|RLCD column
+  table straight from the manifests' `config` block (union of keys; a missing regime renders
+  N/A, never the other run's values). The manifests already record all ~35 knobs, the data
+  sha256, model hash, equivalent CLI command, calibration and git SHA — so the full record
+  exists per run; Bảng 3b surfaces the knobs, Bảng 3 the resources, Bảng 1b/1c the run
+  history and loss points, and `reports/plots/laya_loss_curves.png` the curves (D021).
+
+**Verified numbers at record time (not hand-typed — from the artifacts above).** GPU L4,
+23,034 MiB total; each Laya run's peak ≈6.2 GiB trainer-side vs ≈12.97 GiB both resident
+(cited from D020); smoke walltime 27 s, medium runs ≈5 h (registry-measured).
+
+**Verification.** Two new tests: measured-values render (fixture diagnostics + manifest —
+asserts telemetry floats and the per-regime N/A) and all-N/A render without diagnostics (and
+COMPUTE_AND_ENV.md in the manifest). Read-only real render checked against live repo
+artifacts. Full suite EXIT=0: 363 passed, 1 skipped (was 361/1). Ruff parity with HEAD.

@@ -136,16 +136,18 @@ def test_an_adapter_returning_the_wrong_shape_is_an_error(tmp_path):
 
 # --------------------------------------------------------------------- the cache_laya stage
 
-def _pipeline_fixture(tmp_path, *, model_hash=HASH_A, include_checkpoint=True):
+def _pipeline_fixture(tmp_path, *, model_hash=HASH_A, include_checkpoint=True,
+                      regimes=("ce",)):
     cfg = fx.p5_config(tmp_path)
     fx.write_all(cfg, n_train=2, n_val=1)
     if include_checkpoint:
-        worlds.laya_checkpoint_dir(cfg, "ce").mkdir(parents=True, exist_ok=True)
+        for regime in regimes:
+            worlds.laya_checkpoint_dir(cfg, regime).mkdir(parents=True, exist_ok=True)
     return cfg
 
 
-def _run(cfg, *, adapter=None, force=False, splits=("train_strict",)):
-    return cache_laya.run(cfg=cfg, profile="smoke", regime="ce", splits=splits, limit=None,
+def _run(cfg, *, adapter=None, force=False, splits=("train_strict",), regime="ce"):
+    return cache_laya.run(cfg=cfg, profile="smoke", regime=regime, splits=splits, limit=None,
                           batch=2, force=force, adapter=adapter or fx.StubAdapter(model_hash=HASH_A))
 
 
@@ -169,7 +171,7 @@ def test_run_caches_every_reachable_state_and_registers_the_artifacts(tmp_path):
     assert summary["misses"] == summary["states"] and summary["hits"] == 0
     assert adapter.calls >= 1 and not adapter.closed, "the run must not close an injected adapter"
 
-    written = LayaProbCache(worlds.laya_cache_dir(cfg))
+    written = LayaProbCache(worlds.laya_cache_dir(cfg, "ce"))
     assert len(written) == summary["states"] and written.model_hash == HASH_A
     summary_path = Path(cfg["paths"]["manifests"]) / "P5_cache_laya_ce_smoke.json"
     assert summary_path.is_file() and read_json(summary_path)["states"] == summary["states"]
@@ -193,7 +195,7 @@ def test_a_foreign_checkpoint_stops_the_run_and_keeps_the_rows(tmp_path):
     first = _run(cfg)
     with pytest.raises(ModelHashMismatch):
         _run(cfg, adapter=fx.StubAdapter(model_hash=HASH_B))
-    cached = LayaProbCache(worlds.laya_cache_dir(cfg))
+    cached = LayaProbCache(worlds.laya_cache_dir(cfg, "ce"))
     assert len(cached) == first["states"] and cached.model_hash == HASH_A
     rows = list(read_jsonl(Path(cfg["paths"]["runs"]) / "index.jsonl"))
     assert [row["status"] for row in rows] == ["RUNNING", "SUCCEEDED", "RUNNING", "FAILED"]
@@ -206,8 +208,22 @@ def test_force_replaces_a_foreign_checkpoints_rows(tmp_path):
     summary = _run(cfg, adapter=fx.StubAdapter(model_hash=HASH_B), force=True)
     assert summary["invalidated_rows"] == first["states"]
     assert summary["misses"] == summary["states"]
-    cached = LayaProbCache(worlds.laya_cache_dir(cfg))
+    cached = LayaProbCache(worlds.laya_cache_dir(cfg, "ce"))
     assert cached.model_hash == HASH_B and len(cached) == summary["states"]
+
+
+def test_regimes_keep_separate_caches_and_cannot_invalidate_each_other(tmp_path):
+    """Regression (D019): one shared directory plus checkpoint-stamped rows meant a forced
+    rlcd run unlinked the ce rows — P7's E04 (ce) would destroy the P5 artifact (rlcd)."""
+    cfg = _pipeline_fixture(tmp_path, regimes=("ce", "rlcd"))
+    ce = _run(cfg, regime="ce")
+    rlcd = _run(cfg, regime="rlcd", adapter=fx.StubAdapter(model_hash=HASH_B), force=True)
+
+    ce_cache = LayaProbCache(worlds.laya_cache_dir(cfg, "ce"))
+    assert len(ce_cache) == ce["states"] and ce_cache.model_hash == HASH_A
+    rlcd_cache = LayaProbCache(worlds.laya_cache_dir(cfg, "rlcd"))
+    assert len(rlcd_cache) == rlcd["states"] and rlcd_cache.model_hash == HASH_B
+    assert ce_cache.parquet_path.parent != rlcd_cache.parquet_path.parent
 
 
 def test_a_missing_checkpoint_is_an_error_before_anything_runs(tmp_path):

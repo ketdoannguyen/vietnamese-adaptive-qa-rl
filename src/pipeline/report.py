@@ -154,8 +154,8 @@ STAGES: tuple[Stage, ...] = (
           "python -m src.pipeline.train_laya --config configs/{profile}.yaml --loss rlcd",
           ("outputs/models/laya_rlcd/",), regime="rlcd"),
     Stage("P5", "cache_laya", "P5_cache_laya",
-          "python -m src.pipeline.cache_laya --config configs/{profile}.yaml",
-          ("outputs/models/laya_probs_cache/",)),
+          "python -m src.pipeline.cache_laya --config configs/{profile}.yaml --regime rlcd",
+          ("outputs/models/laya_probs_cache/rlcd/",)),
     Stage("P6", "train_rl", "P6_rl",
           "python -m src.pipeline.train_rl --config configs/{profile}.yaml",
           ("outputs/models/rl_policy/", "reports/rl_training_report.json")),
@@ -493,16 +493,24 @@ def _durations(sources: Sources) -> list[list[Any]]:
                     if row.get("stage") == stage.registry_stage
                     and (stage.regime is None or row.get("regime") == stage.regime)
                     and row.get("profile") in (None, sources.profile)]
-        starts = [row["ts"] for row in relevant if row.get("status") == "RUNNING"]
-        ends = [row["ts"] for row in relevant if row.get("status") != "RUNNING"]
-        seconds = None
-        if starts and ends:
+        # Measured per run_id (its RUNNING row to its terminal row), then summed: a retried,
+        # interrupted or add-on run (e.g. the test-split cache hours later) is still the same
+        # stage, and a whole-span figure would quote hours of other stages' wallclock.
+        by_run: dict[str, list[dict]] = {}
+        for row in relevant:
+            by_run.setdefault(str(row.get("run_id")), []).append(row)
+        spans: list[float] = []
+        for group in by_run.values():
+            starts = [row["ts"] for row in group if row.get("status") == "RUNNING"]
+            ends = [row["ts"] for row in group if row.get("status") != "RUNNING"]
+            if not starts or not ends:
+                continue
             try:
-                delta = (_dt.datetime.fromisoformat(ends[-1])
-                         - _dt.datetime.fromisoformat(starts[0]))
-                seconds = round(delta.total_seconds(), 1)
+                spans.append((_dt.datetime.fromisoformat(ends[-1])
+                              - _dt.datetime.fromisoformat(starts[0])).total_seconds())
             except ValueError:
-                seconds = None
+                continue
+        seconds = round(sum(spans), 1) if spans else None
         durations.append([stage.phase, stage.key, sources.stages[stage.key]["status"], seconds])
     return durations
 
@@ -1053,7 +1061,7 @@ def render_report(sources: Sources, rows: Sequence[Mapping[str, Any]],
         "- Action schema: ANSWER=0, SEARCH_BM25=1, SEARCH_DENSE=2, ABSTAIN=3 "
         "(`src/decision/schema.py`).",
         "- Cache manifests: outputs/models/qa_reader/reader_qa_state_cache_*.json, "
-        "outputs/models/laya_probs_cache/laya_probs.meta.json.",
+        "outputs/models/laya_probs_cache/<regime>/laya_probs.meta.json.",
         "- Nguồn của mọi bảng trong báo cáo này:",
         "",
     ]
@@ -1200,20 +1208,28 @@ def render_reproduce(sources: Sources) -> str:
         f".venv/bin/python -m src.pipeline.cache_reader --config configs/{profile}.yaml",
         f".venv/bin/python -m src.pipeline.make_teacher --config configs/{profile}.yaml",
         "",
-        "# 7-9. Laya (CE, RLCD) + cache prior",
-        f".venv/bin/python -m src.pipeline.train_laya --config configs/{profile}.yaml --loss soft-ce",
-        f".venv/bin/python -m src.pipeline.train_laya --config configs/{profile}.yaml --loss rlcd",
-        f".venv/bin/python -m src.pipeline.cache_laya --config configs/{profile}.yaml",
+        "# 7-9. Laya (CE, RLCD — 2 epoch theo ngân sách D015) + cache prior theo regime (D019)",
+        f".venv/bin/python -m src.pipeline.train_laya --profile {profile} "
+        "--config configs/laya_budget_2ep.yaml --loss soft-ce",
+        f".venv/bin/python -m src.pipeline.train_laya --profile {profile} "
+        "--config configs/laya_budget_2ep.yaml --loss rlcd",
+        f".venv/bin/python -m src.pipeline.cache_laya --config configs/{profile}.yaml "
+        "--regime rlcd",
         "",
-        "# 10. REINFORCE",
-        f".venv/bin/python -m src.pipeline.train_rl --config configs/{profile}.yaml",
+        "# 10. REINFORCE — 3 seed đã đăng ký (42/43/44, D015), rồi khoá lựa chọn trên val",
+        f".venv/bin/python -m src.pipeline.train_rl --config configs/{profile}.yaml --seed 42",
+        f".venv/bin/python -m src.pipeline.train_rl --config configs/{profile}.yaml --seed 43",
+        f".venv/bin/python -m src.pipeline.train_rl --config configs/{profile}.yaml --seed 44",
+        f".venv/bin/python -m src.pipeline.select_rl --config configs/{profile}.yaml",
         "",
-        "# 11. Baseline B5 (calibration) rồi E00-E07 trên val; test chỉ sau khi khoá lựa chọn",
-        f".venv/bin/python -m src.pipeline.train_correctness --config configs/{profile}.yaml",
+        "# 11. Baseline B5 (--oof-folds 3, D015); E00-E07 trên val; test mở đúng một lần:",
+        "#     cache trạng thái test (chỉ dữ liệu, không nhãn) chỉ SAU best_selection.json",
+        f".venv/bin/python -m src.pipeline.train_correctness --config configs/{profile}.yaml "
+        "--oof-folds 3",
         f".venv/bin/python -m src.pipeline.eval_baselines --config configs/{profile}.yaml "
         "--split val_strict",
-        "# (chọn checkpoint B8 tốt nhất trên val — ghi best_selection.json) rồi:",
-        f".venv/bin/python -m src.pipeline.select_rl --config configs/{profile}.yaml",
+        f".venv/bin/python -m src.pipeline.cache_reader --config configs/{profile}.yaml "
+        "--splits test_strict",
         f".venv/bin/python -m src.pipeline.eval_baselines --config configs/{profile}.yaml "
         "--split test_strict",
         "",

@@ -3,7 +3,7 @@
 The RL stage asks the same frozen checkpoint about the same states many times across
 rollouts and updates. This cache answers those repeated questions from disk:
 
-    cache = LayaProbCache(Path("outputs/models/laya_probs_cache"))
+    cache = LayaProbCache(Path("outputs/models/laya_probs_cache/rlcd"))
     probs = cache.get_or_compute(adapter, [(qid, state_hash(text), text), ...])
 
 Staleness is the one thing this module must never get wrong. Rows are stamped with the

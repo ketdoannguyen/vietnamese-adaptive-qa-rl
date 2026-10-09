@@ -193,7 +193,7 @@ def regime_prior_fn(cfg: Mapping[str, Any], regime: str, world_list: Sequence[An
     checkpoint = worlds.laya_checkpoint_dir(cfg, regime)
     if not checkpoint.is_dir():
         raise FileNotFoundError(f"Laya checkpoint for regime {regime!r} is missing: {checkpoint}")
-    return worlds.prewarm_prior(cfg, checkpoint,
+    return worlds.prewarm_prior(cfg, regime, checkpoint,
                                 worlds.reachable_state_requests(world_list, reward, config))
 
 

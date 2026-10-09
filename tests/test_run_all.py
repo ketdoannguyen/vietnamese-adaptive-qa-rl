@@ -24,7 +24,8 @@ from src.utils.hashing import sha256_file, sha256_text
 REAL = Path(__file__).resolve().parents[1]
 DAG = ["download", "audit_split", "build_retrieval", "train_reader", "cache_reader",
        "make_teacher", "train_laya_ce", "train_laya_rlcd", "cache_laya", "train_rl",
-       "train_correctness", "eval_baselines_val", "eval_baselines_test", "report"]
+       "select_rl", "train_correctness", "eval_baselines_val", "cache_reader_test",
+       "eval_baselines_test", "report"]
 
 STUB_STAGE = """\
 import argparse
@@ -232,7 +233,7 @@ def test_a_successful_stage_is_gated_by_the_manifest_the_run_just_wrote(tmp_path
     (root / "src" / "pipeline" / "download.py").write_text(STUB_STAGE, encoding="utf-8")
     proc = run_script(root, "run_all.sh", "--profile", "pilot", "--stop-after", "download")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "[1/14] download (P1_download) — CHẠY" in proc.stdout and "XONG" in proc.stdout
+    assert "[1/16] download (P1_download) — CHẠY" in proc.stdout and "XONG" in proc.stdout
     manifest = json.loads(
         (root / "outputs" / "manifests" / "run_all" / "download.json").read_text("utf-8"))
     assert manifest["stage_key"] == "download" and manifest["registry_stage"] == "P1_download"

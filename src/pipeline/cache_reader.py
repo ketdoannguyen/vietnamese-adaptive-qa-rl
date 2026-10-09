@@ -170,9 +170,10 @@ def run(*, cfg: dict, profile: str, splits: Sequence[str] = CACHE_SPLITS,
     registry.record_artifact(run_id, "P3_reader_cache", artifacts_written, profile=profile,
                              reader_model_hash=inference.model_hash,
                              inference_config_sha=contract["inference_config_sha"],
-                             splits={s: {k: v for k, v in row.items()
-                                         if k not in ("parquet", "meta")}
-                                     for s, row in per_split.items()})
+                             splits=list(splits),
+                             split_summary={s: {k: v for k, v in row.items()
+                                                if k not in ("parquet", "meta")}
+                                            for s, row in per_split.items()})
     return {"run_id": run_id, "reader_model_hash": inference.model_hash,
             "inference_config_sha": contract["inference_config_sha"],
             "contract": str(contract_path), "splits": per_split,

@@ -68,7 +68,10 @@ PREWARM_BATCH = 256
 AMBIGUOUS_FILE = "ambiguous_negatives.json"
 AMBIGUOUS_COLUMN = "ambiguous_negative"
 
-#: The Laya probability cache lives next to the other model artifacts.
+#: The Laya probability cache lives next to the other model artifacts, one subdirectory per
+#: regime (``laya_probs_cache/ce`` / ``laya_probs_cache/rlcd``): stored rows are stamped with
+#: the bound checkpoint's hash, so a shared directory would let a P7 run of one regime
+#: invalidate the other regime's frozen cache (and the artifact P5 registered).
 LAYA_CACHE_DIR = "laya_probs_cache"
 
 
@@ -106,8 +109,11 @@ def laya_checkpoint_dir(cfg: Mapping[str, Any], regime: str) -> Path:
     return resolve(cfg, "models") / LAYA_CHECKPOINT_DIRS[regime]
 
 
-def laya_cache_dir(cfg: Mapping[str, Any]) -> Path:
-    return resolve(cfg, "models") / LAYA_CACHE_DIR
+def laya_cache_dir(cfg: Mapping[str, Any], regime: str) -> Path:
+    """The regime's probability-cache directory (rows are never shared across regimes)."""
+    if regime not in LAYA_REGIMES:
+        raise ValueError(f"unknown Laya regime {regime!r}; known: {list(LAYA_REGIMES)}")
+    return resolve(cfg, "models") / LAYA_CACHE_DIR / regime
 
 
 def env_config(cfg: Mapping[str, Any]) -> EnvConfig:
@@ -260,15 +266,15 @@ def _replay(env: AdaptiveQAEnv, qid: str, history: tuple[int, ...]
     return obs, bool(terminated or truncated)
 
 
-def prewarm_prior(cfg: Mapping[str, Any], checkpoint: str | Path,
+def prewarm_prior(cfg: Mapping[str, Any], regime: str, checkpoint: str | Path,
                   requests: Sequence[tuple[str, str, str]]) -> Callable[[dict], np.ndarray]:
-    """Warm the Laya probability cache for ``requests`` and return the rollout lookup.
+    """Warm ``regime``'s Laya probability cache for ``requests`` and return the rollout lookup.
 
     The adapter is always loaded, even when every row is already cached: binding it is what
     invalidates stored rows when the checkpoint changed, and serving a stale probability would
     be a silent scientific error (see :mod:`src.decision.laya_cache`).
     """
-    cache = LayaProbCache(laya_cache_dir(cfg))
+    cache = LayaProbCache(laya_cache_dir(cfg, regime))
     adapter = LayaAdapter.load(checkpoint)
     try:
         probs: dict[tuple[str, str], np.ndarray] = {}
@@ -353,7 +359,8 @@ def build_worlds(cfg: Mapping[str, Any], split: str, *, limit: int | None = None
     laya_fn = None
     if regime is not None and checkpoint is not None:
         reward = RewardCalculator(RewardConfig.from_dict(cfg))
-        laya_fn = prewarm_prior(cfg, checkpoint, reachable_state_requests(worlds, reward, config))
+        laya_fn = prewarm_prior(cfg, regime, checkpoint,
+                                reachable_state_requests(worlds, reward, config))
     return WorldBundle(split=split, worlds=worlds, questions=questions, docs=docs,
                        laya_fn=laya_fn, ambiguous_qids=load_ambiguous_qids(cfg, split))
 

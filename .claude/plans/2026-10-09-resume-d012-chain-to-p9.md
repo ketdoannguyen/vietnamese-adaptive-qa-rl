@@ -22,21 +22,26 @@
    3 epochs × 35k states, run a measured profile slice (500 rows, 1 epoch) to log step time /
    peak VRAM; if projected CE+RLCD walltime > `limits.max_gpu_hours` (12 h) for the whole
    remaining chain, reduce epochs with the reduction recorded in DECISIONS.md as D-new.
-4. **P5 cache_laya** (`regime=rlcd`) — frozen-prior probabilities over every cached state.
+4. **P5 cache_laya ×2** (`--regime ce`, `--regime rlcd`; per-regime dirs per D019) — each as
+   soon as its checkpoint lands (CE ∥ RLCD now run in parallel, D018); the rlcd cache is the
+   mainline frozen prior, the ce cache backs the E04/E07 baseline rows.
 5. **P6 train_rl × seeds 42/43/44** — masked REINFORCE, best-by-val checkpoint; every run
    archives to `outputs/models/rl_runs/{run_id}/` (D016). CPU-only; can overlap B5.
    Then **P6 select_rl** (`python -m src.pipeline.select_rl`) — freezes the pre-registered
    rule winner (highest val_reward, tie-break lowest seed) into `best_selection.json`,
    swaps the canonical `models/rl_policy` to the winner, writes the freeze LAST.
 6. **B5 train_correctness** — `--oof-folds 3` group-disjoint reader refit + correctness
-   estimator (spec 08, D015). GPU heavy; runs after `cache_laya` frees the GPU (D001).
-7. **P7 eval_baselines val** → **select_rl freeze** (already held from step 5) →
-   **eval_baselines test** (single access, logged).
+   estimator (spec 08, D015). GPU heavy; overlaps the Laya block only within the D018
+   headroom rule.
+7. **P7 eval_baselines val** → **cache_reader --splits test_strict** (data-only state cache,
+   strictly after the step-5 freeze, D019) → **eval_baselines test** (single access, logged).
 8. **P9 report** — REPORT.md/txt, results.csv/json, model card, REPRODUCE, handoff, zip.
 
 ## Hard rules carried
 
-- One GPU process at a time (D001); models loaded/unloaded phase by phase.
+- GPU stages: one process at a time was D001/D017; **superseded by D018 (user-authorized,
+  2026-10-09)**: CE ∥ RLCD run in parallel on the 24 GiB L4 with a ≥4 GiB headroom rule;
+  models loaded/unloaded phase by phase; two runs never write the same output directory.
 - Nothing hand-typed into reports; unrun stages stay `NOT_RUN`.
 - Test split opened once, after `best_selection.json`; `docs/TEST_ACCESS_LOG.md` written by P9.
 - Every deviation goes to `docs/DECISIONS.md` with measured before/after.

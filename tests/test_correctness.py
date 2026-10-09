@@ -20,8 +20,11 @@ tests hold the pipeline to:
 
 from __future__ import annotations
 
+import builtins
 import csv
+import dis
 import json
+import types
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -612,3 +615,23 @@ def test_single_class_oof_rows_fall_back_to_raw_without_pretending(tmp_path, mon
         loaded.predict(np.zeros((1, len(C.CORRECTNESS_FEATURES))))
     report = Path(summary["report"]).read_text(encoding="utf-8")
     assert "B5-RAW has no calibrated probability" in report
+
+
+def _global_loads(code) -> set[str]:
+    """Every ``LOAD_GLOBAL`` name a code object (and its inner code objects) reads."""
+    names = {instr.argval for instr in dis.get_instructions(code)
+             if instr.opname == "LOAD_GLOBAL"}
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            names |= _global_loads(const)
+    return names
+
+
+def test_fold_reader_source_loads_only_names_the_module_defines():
+    """Regression (D019): the OOF fold reader called bare ``load_tokenizer``/``load_model``,
+    which this module never defined — only a GPU run of the 3-fold stage hit the NameError.
+    Pin every global the function (and its inner closures) loads to a name that exists in the
+    module or in builtins."""
+    missing = sorted(name for name in _global_loads(tc.train_fold_reader_source.__code__)
+                     if name not in vars(tc) and not hasattr(builtins, name))
+    assert missing == []

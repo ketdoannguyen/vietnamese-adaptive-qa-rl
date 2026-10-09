@@ -13,8 +13,9 @@ in batches, and leaves a parquet the rollouts read without touching the model.
 stored rows belong to another checkpoint the run stops with
 :class:`~src.decision.laya_cache.ModelHashMismatch` *before* anything is recomputed — silently
 mixing priors from two checkpoints would be a silent scientific error. ``--force`` is for the
-legitimate replacement case only, and note the cache directory is shared by both regimes: a
-forced run for one regime discards the other regime's rows.
+legitimate replacement case only. Each regime owns its own cache directory
+(``laya_probs_cache/<regime>``), so a forced run for one regime can only discard that regime's
+rows — a P7 row for the other regime can never invalidate this run's artifact.
 
 **Independent tree check.** Per split the run counts the states of the retrieval tree
 (:func:`src.retrieval.states.reachable_states` over the same rankings the environment uses).
@@ -105,7 +106,7 @@ def run(*, cfg: dict, profile: str, regime: str | None = None,
     if not checkpoint.is_dir():
         raise FileNotFoundError(f"Laya checkpoint for regime {regime_name!r} is missing: "
                                 f"{checkpoint} — train it with the P5 stage (train_laya)")
-    cache = LayaProbCache(worlds.laya_cache_dir(cfg))
+    cache = LayaProbCache(worlds.laya_cache_dir(cfg, regime_name))
     run_id = f"p5-cache-laya-{regime_name}-{profile}-{now_iso().replace(':', '')}"
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
     registry.append(run_id=run_id, stage="P5_cache_laya", status="RUNNING", profile=profile,

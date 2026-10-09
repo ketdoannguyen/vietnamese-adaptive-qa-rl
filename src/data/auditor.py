@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from src.data import splitter
 from src.data.normalizer import (NormalizedRow, content_words, question_type, tokenize_words)
 from src.data.schemas import DocumentRecord, ScenarioRecord
 from src.utils.hashing import stable_seed
@@ -198,10 +199,10 @@ def near_duplicate_block(
     for i, a in enumerate(splits):
         for b in splits[i + 1:]:
             docs_a, docs_b = docs_by_split[a], docs_by_split[b]
-            report = cross_similarity(sorted(docs_a), [docs_a[d].text for d in sorted(docs_a)],
-                                      sorted(docs_b), [docs_b[d].text for d in sorted(docs_b)],
-                                      threshold=threshold)
-            block[f"{a}~{b}"] = near_duplicate_report(report, limit=limit)
+            report = splitter.cross_similarity(sorted(docs_a), [docs_a[d].text for d in sorted(docs_a)],
+                                               sorted(docs_b), [docs_b[d].text for d in sorted(docs_b)],
+                                               threshold=threshold)
+            block[f"{a}~{b}"] = splitter.near_duplicate_report(report, limit=limit)
     return block
 
 

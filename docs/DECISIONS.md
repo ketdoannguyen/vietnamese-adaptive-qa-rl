@@ -689,3 +689,101 @@ reduction is taken, and the two losses stay identical (spec 04 §4/§6).
 completed-run accounting; the registry carries the INTERRUPTED rows and their spans, and the
 final report must not present the killed attempt as progress. If this detached run is also
 killed, the same recovery path applies and the walltime cost is reported as lost.
+
+## D018 — Parallel GPU stages authorized: CE ∥ RLCD on the 24 GiB L4 (revises D001) (2026-10-09)
+
+**Instruction (user, 2026-10-09).** Parallel training is allowed as long as the GPU does not
+overflow — the box has a 24 GiB L4 while Laya training peaks around 6 GiB, so overlapping runs
+are wanted to shorten the critical path. This supersedes D017's closing "one GPU process at a
+time" sentence and narrows D001 to a VRAM-budget rule.
+
+**Measured before acting.** `nvidia-smi` at decision time: 6,486 MiB used / 16,078 MiB free of
+23,034 MiB (CE run resident, peak 6.1 GiB per D015); CPU: 4 cores, load average 1.76 (≈44 %
+utilisation), so a second data-loader fits without saturating; RAM: ≥9 GiB available, one Laya
+process ≈3.2 GiB RSS. Projected pair: ≈12.5 GiB of 23 GiB GPU and ≈3.5 of 4 cores.
+
+**Action.** The sequential wrapper `scripts/run_p5_gpu_chain.sh` (bash PID 121983) was killed
+on purpose so its scripted RLCD step could not later collide with the parallel one in
+`outputs/models/laya_rlcd/`; the soft-CE training process (PID 121986) was untouched and kept
+stepping (reparented to init, own session, verified in `ps`). RLCD then started immediately,
+detached (`setsid nohup`), with the same overlay `configs/laya_budget_2ep.yaml` and identical
+conditions as CE — spec 04 §4/§5 requires the two losses to differ only in the loss
+(registry: `p5-laya-rlcd-medium-2026-10-09T033300+0000`).
+
+**Rule from now on.** Concurrent GPU stages are allowed when the summed measured peaks plus
+≥4 GiB headroom fit the device (the CE∥RLCD pair qualifies at ≈12.5 GiB of 23 GiB). Two runs
+writing the same output directory remain forbidden. The append-only registry is safe under
+concurrent writers: one `write(2)` per JSONL row with `O_APPEND`
+(`src/utils/io.py:append_jsonl`); both RUNNING rows were observed side by side. Walltimes
+measured under 2-way concurrency are reported as such; per-run durations in the P9 table are
+computed per `run_id` (D019) so concurrent, retried and interrupted spans are never conflated.
+
+**Sequence that follows.** `cache_laya` runs per regime (`--regime ce` / `--regime rlcd`)
+as soon as each checkpoint lands; the Laya block still precedes B5/P7, and B5/P7 order is
+unchanged. If a concurrent job OOMs, the failing run is killed and re-run alone — the registry
+keeps the evidence either way. REPRODUCE.md keeps the **serial** reference chain: parallelism
+is an execution choice, not part of the reproduction contract, and the artifacts are the same.
+
+## D019 — Post-review fix batch: four correctness findings closed before P6–P9 (2026-10-09)
+
+**Context.** An adversarial review of the remaining chain found four defects that would have
+produced hard failures or corrupted evidence during P6–P9 (B5 would not have started at all).
+All four are fixed here, with regression tests or schema corrections, before any affected
+stage runs. The running CE ∥ RLCD jobs are untouched: every edit is in modules those
+processes already imported.
+
+**Finding 1 — B5 could not load its fold readers.** `src/pipeline/train_correctness.py`
+lines 210–211 called `load_tokenizer(...)` / `load_model(...)` unqualified — names the module
+never imported (it aliases the module as `qa_train_reader`) — a guaranteed `NameError` when
+the fold-reader source ran. Fixed by qualifying both calls. The same `ruff --select F821`
+sweep caught `src/data/auditor.py` calling `cross_similarity` / `near_duplicate_report`
+unqualified; fixed by importing and qualifying `splitter`. New regression test
+`test_fold_reader_source_loads_only_names_the_module_defines` walks the bytecode of
+`train_fold_reader_source` and its closures and asserts every `LOAD_GLOBAL` resolves to a
+module global or a builtin, so this failure class cannot recur silently.
+
+**Finding 2 — the test split had no state cache and no DAG node.** `eval_baselines
+--split test_strict` needs the reader state cache for test states; the run_all DAG only ever
+built the train/val cache, so the final evaluation would have crashed. The DAG now has a
+`cache_reader_test` node (`src.pipeline.cache_reader --splits test_strict`, row filter
+`{"splits": ["test_strict"]}`) plus an explicit `select_rl` node; `eval_baselines_test` depends
+on `cache_reader_test`, and `report` depends on both new nodes (14 → 16 nodes). The
+`cache_reader.py` terminal registry row now stores `splits` as a list with a `split_summary`
+dict (it stored a dict while the RUNNING row stored a list, so splits-based gate filters could
+never match). Ordering is deliberate: the test state cache carries no labels, but the
+conservative `TEST_ACCESS_LOG` classifier flags any `P3_reader_cache` row whose `splits`
+mention `test_strict`, so `cache_reader_test` depends on `select_rl` and runs strictly after
+the freeze — same order written into REPRODUCE.
+
+**Finding 3 — P7's E04 (ce) could destroy P5's rlcd prior.** Both regimes shared
+`laya_probs_cache/`, and `LayaProbCache._bind` invalidates unlinked rows whose checkpoint
+stamp mismatches — so the first `cache_laya --regime ce` call from the P7 baseline block
+would have deleted the rlcd rows that are the frozen-P5 mainline artifact. Caches are now
+per-regime: `outputs/models/laya_probs_cache/<regime>/` via `worlds.laya_cache_dir(cfg,
+regime)` (validating the regime name); `prewarm_prior` and `cache_laya` take the regime and
+use the matching directory. Regression test
+`test_regimes_keep_separate_caches_and_cannot_invalidate_each_other` runs ce and rlcd with
+different checkpoint stamps and asserts both caches survive at full size. The demo directory
+`laya_probs_cache_demo` stays shared — it is outside the chain, and a stamp mismatch there
+costs recompute only, never the P5 artifact.
+
+**Finding 4 — REPRODUCE would not have reproduced the executed chain.** The reference chain
+in `report.py` now matches what was actually run: Laya uses `--profile {profile} --config
+configs/laya_budget_2ep.yaml` (the D015 overlay), `cache_laya` is explicitly `--regime rlcd`,
+step 10 is `train_rl` × seeds 42/43/44 then `select_rl`, step 11 is `train_correctness
+--oof-folds 3`, `eval_baselines` val, `cache_reader --splits test_strict`, `eval_baselines`
+test — the ordering from finding 2. The STAGES table's `cache_laya` command/artifact and the
+appendix path string were corrected to the per-regime layout.
+
+**Adjacency fix.** `report._durations` summed all rows of a stage from first start to last
+end, conflating interrupted/retried spans (P3's 00:34–00:44 already mixed in a FAILED
+attempt). It now groups rows by `run_id`, sums each run's RUNNING→terminal span, and never
+merges runs — which is what D018's walltime caveat requires.
+
+**Deliberately not changed.** 94 style-only ruff findings (F541/I001/F401/F811/F841/E741) —
+cosmetic, no behavioural effect, out of scope for this batch.
+
+**Verification.** `uvx ruff check src tests --select F821` → "All checks passed!"; full suite
+EXIT=0: 358 passed, 1 skipped, 359 collected across 22 files, including the two new
+regression tests above. The batch is committed locally as one commit (repo convention: local
+only, no push).

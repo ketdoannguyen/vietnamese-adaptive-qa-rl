@@ -207,8 +207,8 @@ def train_fold_reader_source(cfg: Mapping[str, Any], *, profile: str, seed: int,
             f"(< {MIN_FOLD_ROWS}); a reader trained on this cannot be an honest OOF source")
     seed_everything(seed)
     base_model, revision = reader_cfg["base_model"], reader_cfg.get("revision")
-    tokenizer = load_tokenizer(base_model, revision)
-    model = load_model(base_model, revision)
+    tokenizer = qa_train_reader.load_tokenizer(base_model, revision)
+    model = qa_train_reader.load_model(base_model, revision)
     features = build_feature_set(subset, docs, tokenizer, max_length=int(reader_cfg["max_length"]),
                                  doc_stride=int(reader_cfg["doc_stride"]))
     train_summary = qa_train_reader.train(

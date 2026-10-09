@@ -1,0 +1,158 @@
+{
+  "action_space": [
+    "ANSWER",
+    "SEARCH_BM25",
+    "SEARCH_DENSE",
+    "ABSTAIN"
+  ],
+  "data": {
+    "caps": {
+      "full": null,
+      "medium": 5000,
+      "pilot": 300,
+      "small": 1000,
+      "smoke": 40
+    },
+    "hard_negative_ratio": 0.5,
+    "hf_repo": "taidng/UIT-ViQuAD2.0",
+    "n_distractors": 12,
+    "negative_audit_size": 150,
+    "profile": "smoke",
+    "revision": null,
+    "scenario_seed": 42,
+    "split_seed": 42,
+    "strict_train_ratio": 0.7,
+    "strict_val_ratio": 0.15
+  },
+  "laya": {
+    "calib_frac": 0.1,
+    "calib_max": 400,
+    "calib_seed": 20260922,
+    "device": "auto",
+    "encoder_lr": 2.5e-05,
+    "epochs": 3,
+    "freeze_encoder": false,
+    "frozen": "rlcd",
+    "grad_accum": 8,
+    "head_lr": 0.0001,
+    "head_max_len": 192,
+    "max_len": 768,
+    "micro_batch": 1,
+    "min_abstain_n": 10,
+    "model": "convaiinnovations/laya-multilingual",
+    "revision": null,
+    "seed": 42,
+    "target_error": 0.1
+  },
+  "limits": {
+    "max_gpu_hours": 12,
+    "max_hparam_trials": 8,
+    "max_retries_per_stage": 2
+  },
+  "paths": {
+    "data_cache": "data/cache",
+    "data_diagnostics": "data/diagnostics",
+    "data_indexes": "data/indexes",
+    "data_processed": "data/processed",
+    "data_raw": "data/raw",
+    "data_scenarios": "data/scenarios",
+    "diagnostics": "outputs/diagnostics",
+    "manifests": "outputs/manifests",
+    "models": "outputs/models",
+    "outputs": "outputs",
+    "plots": "reports/plots",
+    "predictions": "outputs/predictions",
+    "reports": "reports",
+    "runs": "outputs/runs",
+    "tables": "reports/tables"
+  },
+  "project": {
+    "name": "vietnamese-adaptive-qa-rl",
+    "version": "0.1.0"
+  },
+  "reader": {
+    "base_model": "FacebookAI/xlm-roberta-base",
+    "batch_size": 4,
+    "doc_stride": 128,
+    "epochs": 2,
+    "fp16": true,
+    "grad_accum": 8,
+    "inference_batch_size": 32,
+    "lr": 2e-05,
+    "max_answer_length": 30,
+    "max_length": 384,
+    "null_score_diff_threshold": 0.0,
+    "revision": null,
+    "threshold_sweep": {
+      "start": -8.0,
+      "step": 0.5,
+      "stop": 8.0
+    },
+    "warmup_ratio": 0.1,
+    "weight_decay": 0.01
+  },
+  "retrieval": {
+    "bm25": {
+      "b": 0.75,
+      "k1": 1.5,
+      "tokenize": "regex_fallback",
+      "top_n_cached": 32
+    },
+    "bootstrap_passages": 1,
+    "dense": {
+      "batch_size": 32,
+      "index_type": "flat_ip",
+      "max_length": 512,
+      "model": "intfloat/multilingual-e5-small",
+      "normalize": true,
+      "passage_prefix": "passage: ",
+      "query_prefix": "query: ",
+      "revision": null
+    },
+    "initial_bootstrap": "bm25",
+    "optional_searches": 2,
+    "passage_per_search_action": 1
+  },
+  "reward": {
+    "bm25_cost": 0.1,
+    "bootstrap_bm25_cost": 0.1,
+    "candidate_f1_threshold": 0.8,
+    "correct_abstain": 0.8,
+    "correct_answer": 2.0,
+    "dense_cost": 0.25,
+    "force_provenance": true,
+    "gamma": 1.0,
+    "unnecessary_abstain": -1.0,
+    "wrong_answer": -2.0
+  },
+  "rl": {
+    "algorithm": "reinforce",
+    "batch_episodes": 32,
+    "checkpoint_every": 25,
+    "early_stop_patience": 6,
+    "entropy_coef": 0.005,
+    "eval_episodes": 64,
+    "eval_every": 25,
+    "gamma": 1.0,
+    "grad_clip": 1.0,
+    "hidden_dim": 128,
+    "lr": 0.0003,
+    "max_optional_search": 2,
+    "max_updates": 500,
+    "seed": 42,
+    "value_coef": 0.5
+  },
+  "seed": 42,
+  "teacher": {
+    "max_states_per_question": 8,
+    "mode": "soft",
+    "temperature": 0.5,
+    "tie_order": [
+      "ANSWER",
+      "ABSTAIN",
+      "SEARCH_BM25",
+      "SEARCH_DENSE"
+    ],
+    "tie_tolerance": 1e-08
+  }
+}

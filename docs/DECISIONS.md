@@ -495,3 +495,197 @@ stage to rerun. The D012 rebuild therefore orders build_retrieval → train_read
 **Tests.** `test_a_state_cache_for_a_reselected_reader_is_refused` (a threshold edit in the
 contract refuses world-building); the P5 fixture now writes the contract file the way the
 real stage does. Full suite green.
+
+## D014 — P2 cache: rows from superseded scenario versions are pruned, not kept (2026-10-09)
+
+**Defect.** `build_retrieval` keys its cache by `scenario_id` and rebuilds a row only when the
+*corpus fingerprint* differs (D011), but a scenario id embeds `SCENARIO_VERSION`
+(`sc:{split}:{qid}:v{n}`). When D012 bumped the version to 2, the re-rank wrote the new v2
+rows **next to** the dead v1 rows for the same qids instead of replacing them: measured
+before the fix, `train_strict_rankings_v1.jsonl` held 9,998 rows = 4,999 v2 + 4,999 v1
+(val 8,798 = 4,399+4,399; test 8,520 = 4,260+4,260). A superseded-version row can never be
+served again — no current scenario asks for its id — so the file carried duplicate qids.
+
+**How it surfaced.** `cache_reader.load_rankings` (the first consumer with a qid-unique
+contract; the P3 state cache is keyed by qid) refused to build:
+`ValueError: … train_strict_rankings_v1.jsonl: duplicate qid 'train:0005-0001-0004'`
+(run `p3-reader-cache-medium-2026-10-09T003415+0000`, FAILED). The guard is correct and
+stays. Nothing published was affected: no v2 state cache had been built, so no downstream
+artifact consumed the duplicated file.
+
+**Fix.** `_reusable_rows` now discards any row whose scenario id does not end in the current
+version suffix and returns the count; `build_split` rewrites the file when rows were pruned
+even if nothing needs re-ranking (the pruning must reach disk, not just memory). The
+cross-profile reuse D011 introduced is preserved *within* a version — rows for scenarios
+outside the current profile that already carry the current version stay in the file.
+
+**Result (re-run `p2-retrieval-medium-2026-10-09T003754+0000`).** Pruned 4,999 / 4,399 /
+4,260 rows (train/val/test), 0 rows re-ranked (all surviving rows cache hits), files now
+hold exactly the current rows; report unchanged (union recall@5 0.9983, unreachable 0.0129),
+which is the point — the pruning removed dead weight, not data.
+
+**Tests.** `test_superseded_scenario_versions_are_pruned_from_the_cache` (an injected `:v0`
+row is dropped, the file is rewritten without re-ranking, and the qid-unique contract
+holds); the fixture now derives ids from `scenario_id_for` so it tracks the version constant.
+
+## D015 — v2-chain measured outcomes and the Laya/B5/REINFORCE training budget (2026-10-09)
+
+**Context.** D012's rebuild chain reached the training stages. Nothing below is assumed:
+every number is from the runs recorded in `outputs/runs/index.jsonl` on 2026-10-09.
+
+**v2 chain, measured (D012's own acceptance signals, re-measured).**
+
+| signal | D012 baseline (v1 corpora) | v2 corpora (measured now) |
+|---|---|---|
+| BM25 episode recall@1 | 0.9789 | **0.8539** (dense 0.9330; top-3 overlap 0.40, diff rate 0.93) |
+| questions whose only correct candidate is deeper | 20 / 4,999 | **260 / 4,999** (root label SEARCH_*: BM25 170, DENSE 90) |
+| SEARCH share of teacher labels | 29 / 34,993 = 0.08% | **408 / 34,993 = 1.17%** (14×) |
+| union recall@5 / unreachable | 0.9984 / 0.0033 | 0.9983 / 0.0129 |
+
+The hard-negative mix (D012) did what it was meant to do: the bootstrap is genuinely harder,
+search becomes the optimal action 13× more often, and the two tools differ enough (top-3
+overlap 0.40) that SEARCH_DENSE carries information. ABSTAIN still dominates the teacher
+labels (71.3%) — the reward structure, not the corpora, sets that; diagnosing it is P8's job,
+and the label mix is reported as measured, not adjusted. The teacher's 34,993 rows are 7
+states × 4,999 questions — the enumeration shape is structural, so this total is not
+corpus-dependent, which is why it equals the v1 count. `oracle_checks.json` re-asserted the
+same invariants as before (legal labels, masked actions exactly zero, soft targets sum to 1,
+no forbidden keys in state text; all 34,993 rows replayed and compared).
+
+**The Laya training budget (measured profile, then decided).** Spec 03 §2/§6 forbids
+guessing walltime, so a profile slice ran first (`p5-laya-ce-smoke-2026-10-09T004850+0000`,
+576 train items, and `…T005229+0000`, 63 items): **0.208 s per train item** at max_len 768 /
+micro-batch 1, fixed overhead 13.9 s, peak VRAM 6.1 GiB. The slice is length-representative
+(mean state 2,555 vs 2,523 chars; ~751 vs ~742 implied tokens against the 768 cap). The
+medium teacher is 34,593 train items after the temperature-calibration slice, so one epoch
+projects to **2.0 h per loss**. base.yaml's 3-epoch default would be 6 h per loss / 12 h for
+CE+RLCD — the entire remaining-chain GPU guardrail — while the chain still owes cache_laya
+(~0.5 h), the B5 cross-fitted reader refits (~2 h), and the P7 rollouts.
+
+**Decision (recorded verbatim from an independent review consult, opus, 2026-10-09).**
+1. **Laya CE and RLCD: 2 epochs each** (≈4.0 h per loss, ≈8 h total; the 12 h guardrail is
+   not binding, and a completed 2-epoch rerun is what a restart of the no-resume trainer
+   would produce anyway). Implemented as the explicit overlay `configs/laya_budget_2ep.yaml`
+   so the resolved config, the run manifest and the registry row all carry `epochs: 2` — the
+   override is never invisible. Both losses stay identical (spec 04 §4/§6 fairness).
+2. **B5 correctness estimator: `--oof-folds 3`** (full cross-fitting; ~2 h GPU vs ~40 min for
+   the 1-fold budget option, spec 08 §3) — with a stated fallback trigger: if the measured
+   wall time of either Laya loss exceeds ~2.3 h/epoch, B5 falls back to `--oof-folds 1` and
+   the reduction is reported.
+3. **REINFORCE: seeds 42, 43, 44** — P6 is CPU-only over cached dynamics and consumes no GPU
+   hours, and a single seed gives no variance estimate; per-seed results are reported as
+   mean ± range, never cherry-picked.
+
+**Honest-reporting notes.** The Laya runs are 2-epoch, not the base config's 3: this is a
+budget-driven reduction, reported as such in the model card and the final report alongside
+the measured profile numbers, step counts and peak VRAM per loss. The two profiling runs are
+measurement scaffolding, not results: their checkpoints
+(`outputs/models/laya_profile_{ce,tiny}`) were deleted after the timing was recorded, so
+their registry rows' artifact paths point at removed directories — kept as history, and the
+data slices remain (`data/processed/laya_profile_slice.jsonl`, `…_tiny.jsonl`) with the exact
+commands in the rows and the manifests under `outputs/manifests/P5_train_laya_ce_smoke.json`
+(overwritten per run, last writer wins) for reproduction.
+
+## D016 — P6 selection step: the missing `best_selection.json` writer, multi-seed archives (2026-10-09)
+
+**Context (defect).** Spec 02 §7 / 03 §5 require one config selected on val (primary: mean
+episodic reward) and its checkpoint hash frozen in `outputs/manifests/best_selection.json`
+BEFORE the strict test may be opened — `eval_baselines --split test_strict` refuses while the
+file is absent and `report.py` proves the ordering in `docs/TEST_ACCESS_LOG.md`. No module
+wrote that file ("Written by the P6 selection step" in `eval_baselines` referred to a step
+that did not exist). Two more defects surfaced while designing it: (a) `train_rl` writes its
+checkpoint to one fixed canonical dir (`outputs/models/rl_policy`) and its report/plots to
+fixed paths, so running seeds 42/43/44 in sequence clobbers two of the three runs' evidence;
+(b) `train_log.jsonl` is append-only (`append_jsonl`) against that shared dir, so a later
+seed's log would contain an earlier seed's rows. The registry rows were also at risk: their
+artifact hashes pointed at the canonical paths, which the next seed overwrites — stale hashes
+that would make the `run_all` gate re-run P6 forever (the same defect class as D012/D014).
+
+**Decision (reviewed via an independent opus consult, 2026-10-09; three corrections adopted).**
+
+1. **`train_rl` archives every successful run** to `outputs/models/rl_runs/{run_id}/` — the
+   whole canonical dir plus `summary/` (that run's report and both plots, which otherwise
+   live at shared fixed paths). The registry row's artifacts point into the archive
+   (immutable); the canonical dir is still written per run, as the spec's ``models/rl_policy``
+   output. One-line companion fix: `train_log.jsonl` is cleared before a real run trains.
+   Second companion fix, found by the suite after the archive landed: run ids carry a
+   second-granularity timestamp, so two same-seed runs started in the same second produced
+   the same run_id — the second run's `archive_run` crashed on the existing directory
+   (FileExistsError, reproduced under load) and both attempts would have shared one id with
+   two terminal registry rows, which `select_rl` reads as "expected 1". `train_rl.unique_run_id`
+   now appends `-2`, `-3`… while the id is already present in the registry, so every attempt
+   is a distinct, selectable run.
+2. **New stage `P6_select`** (`src/pipeline/select_rl.py`). Pre-registered rule, fixed in code
+   before any selection ran: **primary = highest `val_reward`** (mean episodic reward on
+   val_strict, greedy, as the run's own post-`load_best` re-measurement — cross-checked
+   against the registry row, never recomputed at select time); **tie-break = lowest seed**
+   (derivable from frozen artifacts alone; no epsilon — a tolerance is a hidden hyperparameter).
+   Eligibility = exactly one terminal `P6_rl` row, `SUCCEEDED`, this profile; `laya.regime`
+   == `laya.frozen` (rlcd); retrieval sha, both splits' reader hashes, reward-spec hash and
+   `eval_episodes` all equal to what the current config produces — an archive from a
+   superseded chain can never be selected. Registry-vs-`config.json` disagreement, or an
+   archive missing part of its evidence set, is corruption: RUNNING→FAILED row, no freeze.
+3. **Install = clean swap, byte-identical**: stage `copytree(archive minus summary/)` under
+   `.rl_policy.staging`, verify the four core files' sha256 against the winner's archive,
+   replace the canonical dir, restore the winner's `summary/` files to the shared paths
+   (every report citation then describes the selected run, not the last seed), and write the
+   freeze **last** — a failure at any point leaves no new freeze. Freeze schema: rule +
+   `created_utc` (registry-ts format) + `selected_update` (= winner's `best_update`, pinned by
+   the report tests) + per-candidate rows (seed, run_id, val_reward, hashes) + `seed_summary`
+   (mean/min/max) + `seeds_present`/`seeds_missing` vs the D015 budget [42, 43, 44] — the
+   multi-seed mean ± range is first-class, never cherry-picked; a missing planned seed is
+   warned and recorded, not hidden.
+4. **Guards**: refuse while a `P6_rl` run's latest registry row is RUNNING (the registry is
+   append-only, so a finished run keeps a historical RUNNING row — the check reads the latest
+   row per run_id); refuse with exit 2 and **no registry row** when nothing is eligible;
+   refuse to re-freeze after a `test_strict` P7 row unless `--force` (recorded as
+   `forced: true`) — the one-shot-test door of spec 03 §5. Not added to the `run_all` DAG:
+   the DAG cannot model the 3-seed budget, and auto-freezing after one seed would burn the
+   one-shot test on partial evidence; the DAG's existing `needs_freeze` gate stays the
+   enforcement.
+5. **Reporting wiring**: `report.py` gains the `select_rl` stage row and REPRODUCE now names
+   `python -m src.pipeline.select_rl` as the freeze command.
+
+**Verification (measured, all in this repo).** New `tests/test_select_rl.py` (15 tests: rule,
+tie-break order-independence, exclusion reasons, corruption without a freeze, refusals,
+byte-identical rerun, real-toy-run integration asserting the canonical dir equals the winner
+archive minus `summary/` and loads via `load_rl_policy` with `regime=rlcd`); the archive,
+per-seed train-log and same-second run-id behaviour is pinned in `tests/test_rl_pipeline.py`
+(3 updated/added tests; the flake reproduced at ~50% of whole-file runs before the
+`unique_run_id` fix and 0/9 after). Full suite: 356 passed, 1 skipped. E06 is evaluated
+against the frozen winner; E07 (CE-prior arm) stays untrained per D015 and its P7 row will be
+SKIPPED with the existing regime-mismatch reason.
+
+## D017 — Recovery of the killed P5 Laya CE run: detached execution, 2-epoch plan re-checked (2026-10-09)
+
+**Incident.** The medium soft-CE run `p5-laya-ce-medium-2026-10-09T010137+0000` reached
+epoch 1/2 step 33,400 — 48% of the 69,186-step budget — and then died with no terminal row:
+its log stops at 02:51, `outputs/models/laya_ce` was never created, and `train_laya` has no
+resume support (`resume_supported: false` in every row). The cause was operational, not
+resource: the process ran as a child of an interactive agent session and did not survive it
+(same failure class as the P2 retrieval run that was marked INTERRUPTED). A second attempt
+at 03:10 was recognised non-detached within a minute and killed deliberately by the operator
+for the same reason. Both attempts are marked INTERRUPTED in the registry (spec 06 §5) with
+the reason recorded verbatim per row; neither produced artifacts.
+
+**Decision.** The remaining GPU stages run serially from scratch in one detached
+`setsid`/`nohup` job, `scripts/run_p5_gpu_chain.sh`: soft-CE (2 epochs) → RLCD (2 epochs) →
+`cache_laya` (regime `rlcd`), profile medium. Detachment is the fix for the failure mode — the
+job owns its session, so no agent or terminal lifetime can kill it. `set -e` stops the chain
+on the first failure and every stage keeps its own registry rows and manifests, so a partial
+chain cannot silently produce downstream evidence. One GPU process at a time holds throughout
+(D001).
+
+**Budget re-check (measured, not assumed).** The killed run is a direct measurement of the
+medium training rate: 33,400 steps in ≈1.82 h wallclock including model load and data prep →
+≤0.20 s/step → ≤1.9 h/epoch → ≤3.8 h per loss, ≤7.6 h for CE+RLCD. D015 projected 0.208 s/item
+→ 4.0 h per loss; the measured rate is slightly better, only because the projection was
+conservative. With `cache_laya` (~0.6 h), B5 (3 reader refits at the measured 0.15 h each plus
+the estimator) and the P7 rollouts, the remaining chain stays under `limits.max_gpu_hours=12`
+(per-invocation accounting), so **D015's 2-epoch decision stands unchanged** — no new epoch
+reduction is taken, and the two losses stay identical (spec 04 §4/§6).
+
+**Residual risk, stated.** The ≈1.8 h burned by the killed attempt falls outside any
+completed-run accounting; the registry carries the INTERRUPTED rows and their spans, and the
+final report must not present the killed attempt as progress. If this detached run is also
+killed, the same recovery path applies and the walltime cost is reported as lost.

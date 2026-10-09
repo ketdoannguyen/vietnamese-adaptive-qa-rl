@@ -27,7 +27,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from src.data import artifacts
+from src.data import artifacts, scenarios as scenario_mod
 from src.data.schemas import ScenarioRecord
 from src.retrieval.dense import DenseBank, DenseEncoder
 from src.retrieval.engine import ScenarioRanking, rank_scenario, scenario_corpus_sha
@@ -171,19 +171,33 @@ def reachability_path(cfg: dict, split: str) -> Path:
     return path
 
 
-def _reusable_rows(path: Path, *, cfg: dict, force: bool) -> dict[str, dict]:
+def _reusable_rows(path: Path, *, cfg: dict, force: bool) -> tuple[dict[str, dict], int]:
+    """Cached rows keyed by scenario_id, plus the count of discarded superseded-version rows.
+
+    A scenario id embeds ``SCENARIO_VERSION`` (``src.data.scenarios``), so a row from a
+    superseded version can never be served again — the current scenario set only ever asks
+    for current-version ids. Keeping such rows is dead weight and breaks qid-unique consumers
+    (``cache_reader.load_rankings`` refuses a duplicate qid), so they are discarded here; the
+    caller rewrites the file so the pruning reaches disk even when nothing needs re-ranking.
+    """
     if force or not path.exists():
-        return {}
+        return {}, 0
     stamp = retrieval_config_sha(cfg)
-    kept, stale = {}, 0
+    suffix = f":v{scenario_mod.SCENARIO_VERSION}"
+    kept, stale, superseded = {}, 0, 0
     for row in read_jsonl(path):
-        if row.get("config_sha") == stamp:
-            kept[row["scenario_id"]] = row
-        else:
+        if row.get("config_sha") != stamp:
             stale += 1
+        elif not str(row.get("scenario_id", "")).endswith(suffix):
+            superseded += 1
+        else:
+            kept[row["scenario_id"]] = row
     if stale:
         print(f"{path.name}: discarding {stale} row(s) from a different retrieval config")
-    return kept
+    if superseded:
+        print(f"{path.name}: discarding {superseded} row(s) from superseded scenario "
+              f"versions (current v{scenario_mod.SCENARIO_VERSION})")
+    return kept, superseded
 
 
 def _reachability_row(scenario: ScenarioRecord, ranking: ScenarioRanking,
@@ -214,7 +228,7 @@ def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Ma
     ret = cfg["retrieval"]
     top_n = int(ret["bm25"]["top_n_cached"])
     path = rankings_path(cfg, split)
-    rows = _reusable_rows(path, cfg=cfg, force=force)
+    rows, superseded = _reusable_rows(path, cfg=cfg, force=force)
     # A row is reusable only for the corpus it was built over (D011): the same scenario_id
     # gets different distractors at different profile caps, so an id match alone can serve
     # a ranking of a different corpus. Older rows without the fingerprint are rebuilt.
@@ -249,6 +263,9 @@ def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Ma
             encoder.unload()
         # Keep rows for scenarios outside this profile: they stay valid under the same
         # config and let a larger profile reuse them.
+        write_jsonl(path, [rows[key] for key in sorted(rows)])
+    elif superseded:
+        # Only dead rows were dropped; rewrite so the pruning reaches disk (no re-ranking).
         write_jsonl(path, [rows[key] for key in sorted(rows)])
 
     cached = {s.scenario_id: rows[s.scenario_id] for s in scenarios if s.scenario_id in rows}

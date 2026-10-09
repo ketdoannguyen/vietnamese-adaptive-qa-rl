@@ -171,8 +171,19 @@ def test_cli_run_writes_model_plots_report_and_registry(p6, capsys):
     assert stored["run_id"] == summary["run_id"]
     assert stored["retrieval_config_sha"] == config["retrieval_config_sha"]
     assert stored["reward_spec_hash"] == RewardConfig.from_dict(cfg).spec_hash()
+
+    # The run archived its evidence; registry artifacts point into the immutable archive,
+    # not at the canonical dir the next seed run would overwrite.
+    archive = train_rl.archive_dir(cfg, summary["run_id"])
+    assert archive == Path(summary["archive_dir"]) and archive.is_dir()
+    for name in ("policy.safetensors", "scaler.json", "rl_config.json", "config.json",
+                 train_rl.PRIOR_REF_FILE, train_rl.TRAJECTORIES_FILE, train_rl.TRAIN_LOG_FILE,
+                 f"summary/{train_rl.SUMMARY_FILE}", f"summary/{train_rl.CURVE_FILE}",
+                 f"summary/{train_rl.HISTOGRAM_FILE}"):
+        assert (archive / name).is_file() and (archive / name).stat().st_size > 0, name
+    assert read_json(archive / "summary" / train_rl.SUMMARY_FILE)["run_id"] == summary["run_id"]
     for path in summary["artifacts"]:
-        assert Path(path).is_relative_to(root), path
+        assert Path(path).is_relative_to(archive), path
 
     rows = _rows(cfg)
     assert [row["status"] for row in rows] == ["RUNNING", "SUCCEEDED"]
@@ -180,9 +191,46 @@ def test_cli_run_writes_model_plots_report_and_registry(p6, capsys):
     manifest = rows[-1]["artifacts"]
     assert set(manifest) == set(summary["artifacts"])
     assert all("missing" not in entry for entry in manifest.values())
-    assert manifest[str(out / "policy.safetensors")]["sha256"] == sha256_file(
-        out / "policy.safetensors")
+    assert manifest[str(archive / "policy.safetensors")]["sha256"] == sha256_file(
+        archive / "policy.safetensors") == sha256_file(out / "policy.safetensors")
     assert (resolve(cfg, "manifests") / "P6_rl_smoke_config.yaml").is_file()
+
+
+def test_second_seed_keeps_the_first_archive_and_each_train_log_is_per_run(p6):
+    """The canonical dir is shared across seeds; without the per-run archive and the
+    train-log reset, seed 43 would overwrite and contaminate seed 42's evidence."""
+    cfg, _, _ = p6
+    first = train_rl.run(cfg=cfg, profile="smoke", seed=42, max_updates=2)
+    first_archive = train_rl.archive_dir(cfg, first["run_id"])
+    first_policy = (first_archive / "policy.safetensors").read_bytes()
+
+    second = train_rl.run(cfg=cfg, profile="smoke", seed=43, max_updates=2)
+    second_archive = train_rl.archive_dir(cfg, second["run_id"])
+    assert first["run_id"] != second["run_id"]
+    # Both archives persist side by side; the canonical dir now holds the second seed.
+    assert (first_archive / "policy.safetensors").read_bytes() == first_policy
+    assert read_json(second_archive / "config.json")["seed"] == 43
+    assert sha256_file(_policy_dir(cfg) / "policy.safetensors") == sha256_file(
+        second_archive / "policy.safetensors")
+    # Each train log holds exactly its own run's updates: 2 updates, no bleed from seed 42.
+    assert len(list(read_jsonl(first_archive / train_rl.TRAIN_LOG_FILE))) == 2
+    assert len(list(read_jsonl(second_archive / train_rl.TRAIN_LOG_FILE))) == 2
+
+
+def test_same_second_same_seed_runs_get_distinct_run_ids(p6, monkeypatch):
+    """run ids carry a second-granularity timestamp: without the -2 suffix, a second
+    same-seed run in the same second would collide with the first archive (D016) and
+    leave two ambiguous terminal rows under one run_id for select_rl."""
+    cfg, _, _ = p6
+    monkeypatch.setattr(train_rl, "now_iso", lambda: "2026-10-09T05:00:00+00:00")
+    cfg["rl"] = {**cfg["rl"], "max_updates": 1, "eval_every": 1}
+    first = train_rl.run(cfg=cfg, profile="smoke")
+    second = train_rl.run(cfg=cfg, profile="smoke")
+    assert second["run_id"] == first["run_id"] + "-2"
+    for out in (first, second):
+        archive = train_rl.archive_dir(cfg, out["run_id"])
+        assert (archive / "policy.safetensors").is_file()
+        assert read_json(archive / train_rl.CONFIG_FILE)["run_id"] == out["run_id"]
 
 
 def test_cli_dry_run_writes_no_model(p6, capsys):

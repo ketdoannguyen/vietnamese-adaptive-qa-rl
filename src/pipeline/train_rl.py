@@ -22,12 +22,19 @@ Outputs, under ``outputs/models/rl_policy`` (plus plots and a report):
 * ``train_log.jsonl``, ``best/``, ``last/`` — per-update log and checkpoint discipline
 * ``reports/plots/reward_learning_curve.png``, ``reports/plots/action_histogram.png``
 * ``reports/rl_training_report.json`` — the run summary
+
+The canonical dir is shared by every seed run, so each successful run also copies it — plus
+that run's summary and plots — into the immutable ``outputs/models/rl_runs/{run_id}/``, and
+the registry row's artifacts point *there*: the next seed overwrites the canonical copy,
+which would stale the recorded hashes. Multi-seed selection reads the archives
+(:mod:`src.pipeline.select_rl`).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -46,7 +53,7 @@ from src.rl.policy import PolicyNet
 from src.rl.reinforce import RLConfig, ReinforceTrainer, evaluate, rollout
 from src.rl.reward import RewardCalculator, RewardConfig
 from src.utils.config import add_profile_args, config_from_args, resolve, snapshot_config
-from src.utils.io import atomic_write_json, write_jsonl
+from src.utils.io import atomic_write_json, read_jsonl, write_jsonl
 from src.utils.reproducibility import capture_library_versions, seed_everything
 from src.utils.runs import RunRegistry, now_iso
 
@@ -55,6 +62,8 @@ TRAIN_SPLIT, VAL_SPLIT = "train_strict", "val_strict"
 DEFAULT_DEVICE = "cpu"
 
 POLICY_DIR = "rl_policy"
+#: Immutable per-run copies of the canonical dir (one subdirectory per run_id).
+RL_RUNS_DIR = "rl_runs"
 CONFIG_FILE = "config.json"
 PRIOR_REF_FILE = "laya_checkpoint_ref.txt"
 TRAJECTORIES_FILE = "trajectories.jsonl"
@@ -71,6 +80,44 @@ CURVE_WINDOW = 10
 
 def policy_dir(cfg: Mapping[str, Any]) -> Path:
     return resolve(cfg, "models") / POLICY_DIR
+
+
+def archive_dir(cfg: Mapping[str, Any], run_id: str) -> Path:
+    """Immutable per-run copy of the canonical checkpoint dir (multi-seed history)."""
+    return resolve(cfg, "models") / RL_RUNS_DIR / run_id
+
+
+def unique_run_id(registry: RunRegistry, base: str) -> str:
+    """``base`` with a ``-2``, ``-3``… suffix if that run id was already used.
+
+    run ids carry a second-granularity timestamp, so two same-seed runs started in the
+    same second would otherwise share an id — and with it an archive directory (D016)
+    and ambiguous registry rows ("exactly one terminal P6_rl row per run_id").
+    """
+    taken = {row.get("run_id") for row in read_jsonl(registry.path)} \
+        if registry.path.is_file() else set()
+    run_id, n = base, 1
+    while run_id in taken:
+        n += 1
+        run_id = f"{base}-{n}"
+    return run_id
+
+
+def archive_run(out_dir: Path, archive: Path, summary_path: Path,
+                plots: Mapping[str, Path]) -> None:
+    """Copy the run's evidence into ``archive`` so later seed runs cannot overwrite it.
+
+    ``out_dir`` itself is copied whole (policy files, config, traces, train log, ``best/``,
+    ``last/``); the summary and the two plots also live at fixed shared paths, so snapshot
+    them into ``archive/summary/`` — otherwise the archive of seed 42 would cite seed 43's
+    report as soon as seed 43 finishes.
+    """
+    shutil.copytree(out_dir, archive)
+    summary_dir = archive / "summary"
+    summary_dir.mkdir()
+    shutil.copy2(summary_path, summary_dir / SUMMARY_FILE)
+    for key, name in (("curve", CURVE_FILE), ("histogram", HISTOGRAM_FILE)):
+        shutil.copy2(plots[key], summary_dir / name)
 
 
 def make_env(cfg: Mapping[str, Any], bundle: WorldBundle) -> AdaptiveQAEnv:
@@ -249,8 +296,9 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
     device = str(device or DEFAULT_DEVICE)
     out_dir = policy_dir(cfg)
 
-    run_id = f"p6-rl-{profile}-{rl_config.seed}-{now_iso().replace(':', '')}"
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
+    run_id = unique_run_id(registry,
+                           f"p6-rl-{profile}-{rl_config.seed}-{now_iso().replace(':', '')}")
     registry.append(run_id=run_id, stage=STAGE, status="RUNNING", profile=profile,
                     seed=rl_config.seed, limit=limit, max_updates=rl_config.max_updates,
                     laya_regime=regime, device=device, dry_run=dry_run)
@@ -293,6 +341,10 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
             return summary
 
         # 3. Train (on-policy rollouts, cached dynamics) on the train split, early-stop on val.
+        # The canonical dir outlives a seed run and ``train_log.jsonl`` is append-only
+        # (``append_jsonl``), so a leftover log from the previous seed would contaminate this
+        # run's archive evidence. Clear it; every other file is overwritten in place.
+        (out_dir / TRAIN_LOG_FILE).unlink(missing_ok=True)
         result = trainer.train()
         checks = training_is_real(result["updates"])
         if result["best_update"] is None:
@@ -316,7 +368,7 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
         trainer.save(out_dir)  # canonical policy.safetensors + scaler.json + rl_config.json
 
         # 4. Provenance, traces, plots, report.
-        reader = {split: _reader_meta(cfg, split) for split in (TRAIN_SPLIT, VAL_SPLIT)}
+        reader = {split: reader_meta(cfg, split) for split in (TRAIN_SPLIT, VAL_SPLIT)}
         config = {
             "stage": STAGE, "run_id": run_id, "profile": profile,
             "algorithm": rl_config.algorithm, "seed": rl_config.seed, "device": device,
@@ -342,10 +394,17 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
         plots = write_plots(cfg, updates, final_val,
                             best_update=int(result["best_update"]))
 
-        artifacts = [out_dir / "policy.safetensors", out_dir / "scaler.json",
-                     out_dir / "rl_config.json", config_path, prior_path,
-                     out_dir / TRAJECTORIES_FILE, out_dir / TRAIN_LOG_FILE,
-                     plots["curve"], plots["histogram"]]
+        # Registry artifacts point into the immutable per-run archive, never the canonical
+        # dir: the next seed run overwrites the canonical copy, which would stale these
+        # hashes and make the run_all gate re-run this stage forever.
+        archive = archive_dir(cfg, run_id)
+        summary_dir = archive / "summary"
+        artifacts = [archive / "policy.safetensors", archive / "scaler.json",
+                     archive / "rl_config.json", archive / CONFIG_FILE,
+                     archive / PRIOR_REF_FILE, archive / TRAJECTORIES_FILE,
+                     archive / TRAIN_LOG_FILE, summary_dir / SUMMARY_FILE,
+                     summary_dir / CURVE_FILE, summary_dir / HISTOGRAM_FILE]
+        summary_path = resolve(cfg, "reports") / SUMMARY_FILE
         summary = {
             "run_id": run_id, "stage": STAGE, "profile": profile, "seed": rl_config.seed,
             "device": device, "algorithm": rl_config.algorithm,
@@ -370,10 +429,12 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
                           "cached_trajectories": False},
             "rl_config": asdict(rl_config), "env_config": config["env_config"],
             "artifacts": [str(path) for path in artifacts],
-            "summary_path": str(resolve(cfg, "reports") / SUMMARY_FILE),
+            "summary_path": str(summary_path),
+            "archive_dir": str(archive),
             "library_versions": capture_library_versions(),
         }
-        atomic_write_json(resolve(cfg, "reports") / SUMMARY_FILE, summary)
+        atomic_write_json(summary_path, summary)
+        archive_run(out_dir, archive, summary_path, plots)
         registry.record_artifact(
             run_id, STAGE, artifacts, profile=profile, seed=rl_config.seed,
             retrieval_config_sha=config["retrieval_config_sha"],
@@ -394,7 +455,7 @@ def _replaced(bundle: WorldBundle, keep: Sequence[EpisodeWorld]) -> WorldBundle:
                        ambiguous_qids=bundle.ambiguous_qids)
 
 
-def _reader_meta(cfg: Mapping[str, Any], split: str) -> dict[str, Any]:
+def reader_meta(cfg: Mapping[str, Any], split: str) -> dict[str, Any]:
     parquet, meta_path = state_cache_paths(cfg, split)
     meta = load_state_cache_meta(meta_path)
     return {"parquet": str(parquet), "meta": str(meta_path),

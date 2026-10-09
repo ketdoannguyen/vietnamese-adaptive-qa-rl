@@ -159,6 +159,9 @@ STAGES: tuple[Stage, ...] = (
     Stage("P6", "train_rl", "P6_rl",
           "python -m src.pipeline.train_rl --config configs/{profile}.yaml",
           ("outputs/models/rl_policy/", "reports/rl_training_report.json")),
+    Stage("P6", "select_rl", "P6_select",
+          "python -m src.pipeline.select_rl --config configs/{profile}.yaml",
+          ("outputs/manifests/best_selection.json",)),
     Stage("P8", "train_correctness", "B5_correctness",
           "python -m src.pipeline.train_correctness --config configs/{profile}.yaml",
           ("outputs/models/correctness_estimator/", "reports/correctness_calibration.md")),
@@ -1209,7 +1212,8 @@ def render_reproduce(sources: Sources) -> str:
         f".venv/bin/python -m src.pipeline.train_correctness --config configs/{profile}.yaml",
         f".venv/bin/python -m src.pipeline.eval_baselines --config configs/{profile}.yaml "
         "--split val_strict",
-        "# (khoá best_selection.json — do bước chọn checkpoint trên val) rồi:",
+        "# (chọn checkpoint B8 tốt nhất trên val — ghi best_selection.json) rồi:",
+        f".venv/bin/python -m src.pipeline.select_rl --config configs/{profile}.yaml",
         f".venv/bin/python -m src.pipeline.eval_baselines --config configs/{profile}.yaml "
         "--split test_strict",
         "",

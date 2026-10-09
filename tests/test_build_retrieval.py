@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from src.data import artifacts
+from src.data.scenarios import scenario_id_for
 from src.pipeline import build_retrieval as br
 from src.utils.config import load_config
 from src.utils.io import read_jsonl, write_jsonl, write_parquet
@@ -20,21 +21,27 @@ from src.utils.runs import RunRegistry
 from tests import retrieval_stub
 
 SPLIT = "train_strict"
+
+
+def scenario_id(qid: str) -> str:
+    return scenario_id_for(SPLIT, qid)
+
+
 DOCS = {k: v for k, v in retrieval_stub.DOCS.items() if k != "doc_outside"}
 QUESTIONS = {"q:capital": retrieval_stub.QUESTION, "q:pho": "Phở là gì?",
              "q:noanswer": "Ai là tổng thống Pháp?"}
 SCENARIOS = [
-    {"scenario_id": f"sc:{SPLIT}:q:capital:v1", "qid": "q:capital", "split": SPLIT,
+    {"scenario_id": scenario_id("q:capital"), "qid": "q:capital", "split": SPLIT,
      "corpus_doc_ids": ["doc_hanoi", "doc_hcm", "doc_pho"], "scenario_seed": 42,
      "gold_doc_id": "doc_hanoi", "reachable_bm25": None, "reachable_dense": None,
      "difficulty": {"answerable": True}},
     # Three documents minimum: with N=2 a term present in exactly one document gets an IDF
     # of zero and BM25 ranks by document length noise instead of by the query terms.
-    {"scenario_id": f"sc:{SPLIT}:q:pho:v1", "qid": "q:pho", "split": SPLIT,
+    {"scenario_id": scenario_id("q:pho"), "qid": "q:pho", "split": SPLIT,
      "corpus_doc_ids": ["doc_pho", "doc_hanoi", "doc_river"], "scenario_seed": 42,
      "gold_doc_id": "doc_pho", "reachable_bm25": None, "reachable_dense": None,
      "difficulty": {"answerable": True}},
-    {"scenario_id": f"sc:{SPLIT}:q:noanswer:v1", "qid": "q:noanswer", "split": SPLIT,
+    {"scenario_id": scenario_id("q:noanswer"), "qid": "q:noanswer", "split": SPLIT,
      "corpus_doc_ids": ["doc_river", "doc_hcm"], "scenario_seed": 42,
      "gold_doc_id": None, "reachable_bm25": None, "reachable_dense": None,
      "difficulty": {"answerable": False}},
@@ -90,7 +97,7 @@ def test_pipeline_writes_rankings_reachability_and_report(cfg):
 
     reach = list(read_jsonl(br.reachability_path(cfg, SPLIT)))
     by_id = {r["scenario_id"]: r for r in reach}
-    negative = by_id[f"sc:{SPLIT}:q:noanswer:v1"]
+    negative = by_id[scenario_id("q:noanswer")]
     assert negative["answerable"] is False
     assert negative["reachable_bm25"] is None and negative["reachable_dense"] is None
     answerable = [r for r in reach if r["answerable"]]
@@ -154,6 +161,27 @@ def test_a_cached_row_for_a_changed_corpus_is_rebuilt(cfg):
     assert rebuilt[changed["scenario_id"]]["corpus_sha"] != \
         next(r for r in rows if r["scenario_id"] == changed["scenario_id"])["corpus_sha"]
     assert "doc_river" in rebuilt[changed["scenario_id"]]["rankings"]["bm25"]
+
+
+def test_superseded_scenario_versions_are_pruned_from_the_cache(cfg):
+    """A row whose scenario id carries an older version can never be served again (ids are
+    versioned), and keeping it makes two rows share one qid — which ``cache_reader`` refuses.
+    The next run must drop it and rewrite the file even when nothing needs re-ranking.
+    """
+    _run(cfg)
+    path = br.rankings_path(cfg, SPLIT)
+    rows = list(read_jsonl(path))
+    old = dict(rows[0], scenario_id=f"sc:{SPLIT}:{rows[0]['qid']}:v0")
+    write_jsonl(path, [old, *rows])
+    before = path.stat().st_mtime_ns
+
+    second = _run(cfg)
+    assert second["splits"][SPLIT] == {"cache_hits": 3, "ranked": 0, "scenarios": 3}
+    assert path.stat().st_mtime_ns != before  # pruned rows reached disk
+    kept = list(read_jsonl(path))
+    assert "v0" not in "".join(row["scenario_id"] for row in kept)
+    qids = [row["qid"] for row in kept]
+    assert len(qids) == len(set(qids)) == 3  # cache_reader's qid-unique contract holds
 
 
 def test_force_rebuilds_the_dense_bank(cfg):

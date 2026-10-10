@@ -1,5 +1,6 @@
 # Environment
 .venv/
+.venv-gliner/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -23,6 +24,7 @@ data/diagnostics/
 outputs/models/
 outputs/predictions/
 outputs/runs/
+outputs/experiments/
 *.safetensors
 *.bin
 *.pt

@@ -15,7 +15,7 @@ Contract highlights (`02_IMPLEMENTATION/03_QA_READER_TRAINING_AND_CACHE.md` §5)
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from src.utils.hashing import sha256_json
 
@@ -124,17 +124,3 @@ class ReaderCache:
             return pred
         raise KeyError(f"reader cache miss for key {key[:16]}...; "
                        "refusing to substitute an empty prediction")
-
-
-def best_across_docs(predictions: Iterable[ReaderPrediction]) -> ReaderPrediction:
-    """Pick the highest-scoring non-null candidate across documents.
-
-    Selection uses the reader's own score only — never the gold answer (spec 05 §5).
-    """
-    best: ReaderPrediction | None = None
-    for pred in predictions:
-        if pred.answer_text is None or not pred.provenance_ok:
-            continue
-        if best is None or pred.non_null_score > best.non_null_score:
-            best = pred
-    return best if best is not None else NULL_PREDICTION

@@ -39,7 +39,7 @@ def state_cache_key(meta: Mapping[str, Any], qid: str, visible_doc_ids: Sequence
 
 
 def best_state_prediction(predictions: Sequence[ReaderPrediction]) -> ReaderPrediction:
-    """The environment's rule for one visible-document state (``best_across_docs``).
+    """The environment's rule for one visible-document state.
 
     Highest-scoring candidate that survived the threshold; when none did, the highest-scoring
     pair is still reported — with ``answer_text=None`` — so the state keeps its honest scores

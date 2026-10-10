@@ -1728,6 +1728,11 @@ def write_zip(root: Path, zip_path: Path) -> tuple[Path | None, str]:
 def run(*, cfg: Mapping[str, Any], profile: str, zip_handoff: bool = False,
         now: str | None = None, registry: RunRegistry | None = None) -> dict[str, Any]:
     """Generate every report product; idempotent for a fixed ``now``."""
+    experiment_root = (REPO_ROOT / "outputs/experiments").resolve()
+    if any((REPO_ROOT / value).resolve().is_relative_to(experiment_root)
+           for value in cfg.get("paths", {}).values() if isinstance(value, str)):
+        raise ValueError("experiment report is not isolated: historical test access log "
+                         "and artifact scans would be overwritten/read; wait for P7")
     now = now or now_iso()
     sources = load_sources(cfg, profile, now)
     # Loss figures from the captured training logs; the manifest (reports/ tree) picks the

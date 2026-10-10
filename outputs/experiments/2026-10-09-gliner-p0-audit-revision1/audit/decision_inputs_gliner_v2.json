@@ -1,0 +1,605 @@
+{
+  "audit": "decision_inputs",
+  "backend": "gliner",
+  "created_utc": "2026-10-09T20:59:52+00:00",
+  "namespace": "2026-10-09-gliner-p0-audit-revision1",
+  "output": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0-audit-revision1/audit/decision_inputs_gliner_v2.json",
+  "argv": [
+    "--backend",
+    "gliner",
+    "--data",
+    "data/processed/laya_train.jsonl",
+    "--base",
+    "outputs/experiments/2026-10-09-gliner-p0/hf/model",
+    "--namespace",
+    "2026-10-09-gliner-p0-audit-revision1"
+  ],
+  "state_text_version": "v2",
+  "environment": {
+    "python": "3.10.12",
+    "executable": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/.venv-gliner/bin/python",
+    "backend_package": "gliner2==2.0.0",
+    "transformers": "4.57.6"
+  },
+  "data": {
+    "paths": [
+      {
+        "path": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/data/processed/laya_train.jsonl",
+        "sha256": "1fb2ee70be535aab12cdb503f84d2bc3ecf741f4e37a0ef9a42e9daa2a503ecc"
+      }
+    ],
+    "rows_audited": 34993,
+    "sampling": {
+      "limit": null,
+      "stride": 1
+    },
+    "splits": {
+      "train_strict": 34993
+    },
+    "depth": {
+      "0": 4999,
+      "1": 9998,
+      "2": 19996
+    },
+    "action": {
+      "ABSTAIN": 24942,
+      "ANSWER": 9643,
+      "SEARCH_BM25": 228,
+      "SEARCH_DENSE": 180
+    }
+  },
+  "tokenizer": {
+    "source": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/hf/model",
+    "class": "DebertaV2TokenizerFast",
+    "is_fast": true,
+    "vocab_size": 250101,
+    "model_max_length": null,
+    "identity_files": {
+      "tokenizer.json": "c62446df87ae18ec98b133f8f84fc449a07cc89bbf8ef192a4cb5f9c53777a7a",
+      "tokenizer_config.json": "fd4a31dc2f1f17e31638c5f0e783b81cdb2fbe6bddd116a8d9e5d50d78148cf1",
+      "config.json": "aa29cd584316b61b0bfed94d03ee1cfdaf28b46a37686293742929c49b8bd2f7",
+      "encoder_config/config.json": "d0ebbcb8b458e285a39e12cc315cbaf3d1c6f631e7281e6b22dd5b4071183f83"
+    }
+  },
+  "limits": {
+    "kind": "word",
+    "trainer_word_cap": 4096,
+    "inference_max_len": null,
+    "head_subwords": 194,
+    "subword_truncation": "none in the audited classification path",
+    "encoder_max_position_embeddings": 512,
+    "encoder_position_biased_input": false,
+    "encoder_relative_attention": true,
+    "encoder_max_relative_positions": -1,
+    "head_share_of_declared_position_count": 0.37890625,
+    "rows_over_encoder_max_position_embeddings": 1.0,
+    "rows_with_state_subwords_over_declared_position_count": 0.9995427656959963
+  },
+  "source_verification": {
+    "package": "gliner2==2.0.0",
+    "apis": [
+      "gliner2.models.base.load_extractor_tokenizer",
+      "gliner2.processor.SchemaTransformer.collate_fn_inference",
+      "gliner2.classification.schema.ClassificationSchema.single",
+      "gliner2.classification.compiler.compile_schema"
+    ],
+    "schema_fingerprint": "a592074aed554ed51ae6acef9e66873d711ad44f0503167f82c906bef1c72255",
+    "word_cap_check": "the cap counts words after splitting and drops words before subword tokenization; no subword truncation exists in this path"
+  },
+  "overall": {
+    "n": 34993,
+    "truncated_share": 0.0,
+    "unit_retention_share": {
+      "mean": 1.0,
+      "p10": 1.0,
+      "p50": 1.0,
+      "p90": 1.0
+    },
+    "full_units": {
+      "mean": 538.2608235932901,
+      "p50": 596,
+      "p90": 662,
+      "p95": 674,
+      "max": 803
+    },
+    "retained_units": {
+      "mean": 538.2608235932901,
+      "p50": 596
+    },
+    "full_subwords": {
+      "mean": 1309.3234932700825,
+      "p95": 1591,
+      "max": 1728
+    },
+    "retained_subwords": {
+      "mean": 1309.3234932700825,
+      "p50": 1429
+    },
+    "encoder_input_retention_share": {
+      "mean": 1.0
+    },
+    "segments": {
+      "evidence": {
+        "present_share": 1.0,
+        "retained_share": 1.0,
+        "fully_retained_share": 1.0,
+        "char_coverage_mean": 1.0,
+        "char_coverage_p10": 1.0
+      },
+      "candidate": {
+        "present_share": 1.0,
+        "retained_share": 1.0,
+        "fully_retained_share": 1.0,
+        "char_coverage_mean": 1.0,
+        "char_coverage_p10": 1.0
+      },
+      "budget": {
+        "present_share": 1.0,
+        "retained_share": 1.0,
+        "fully_retained_share": 1.0,
+        "char_coverage_mean": 1.0,
+        "char_coverage_p10": 1.0
+      },
+      "action_mask": {
+        "present_share": 1.0,
+        "retained_share": 1.0,
+        "fully_retained_share": 1.0,
+        "char_coverage_mean": 1.0,
+        "char_coverage_p10": 1.0
+      }
+    }
+  },
+  "by_depth": {
+    "0": {
+      "n": 4999,
+      "truncated_share": 0.0,
+      "unit_retention_share": {
+        "mean": 1.0,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "full_units": {
+        "mean": 300.8097619523905,
+        "p50": 304,
+        "p90": 325,
+        "p95": 331,
+        "max": 404
+      },
+      "retained_units": {
+        "mean": 300.8097619523905,
+        "p50": 304
+      },
+      "full_subwords": {
+        "mean": 815.4058811762352,
+        "p95": 879,
+        "max": 963
+      },
+      "retained_subwords": {
+        "mean": 815.4058811762352,
+        "p50": 821
+      },
+      "encoder_input_retention_share": {
+        "mean": 1.0
+      },
+      "segments": {
+        "evidence": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "candidate": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "budget": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "action_mask": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        }
+      }
+    },
+    "1": {
+      "n": 9998,
+      "truncated_share": 0.0,
+      "unit_retention_share": {
+        "mean": 1.0,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "full_units": {
+        "mean": 466.67863572714543,
+        "p50": 469,
+        "p90": 499,
+        "p95": 507,
+        "max": 590
+      },
+      "retained_units": {
+        "mean": 466.67863572714543,
+        "p50": 469
+      },
+      "full_subwords": {
+        "mean": 1162.8421684336868,
+        "p95": 1247,
+        "max": 1340
+      },
+      "retained_subwords": {
+        "mean": 1162.8421684336868,
+        "p50": 1167
+      },
+      "encoder_input_retention_share": {
+        "mean": 1.0
+      },
+      "segments": {
+        "evidence": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "candidate": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "budget": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "action_mask": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        }
+      }
+    },
+    "2": {
+      "n": 19996,
+      "truncated_share": 0.0,
+      "unit_retention_share": {
+        "mean": 1.0,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "full_units": {
+        "mean": 633.4146829365873,
+        "p50": 636,
+        "p90": 672,
+        "p95": 682,
+        "max": 803
+      },
+      "retained_units": {
+        "mean": 633.4146829365873,
+        "p50": 636
+      },
+      "full_subwords": {
+        "mean": 1506.0435587117424,
+        "p95": 1606,
+        "max": 1728
+      },
+      "retained_subwords": {
+        "mean": 1506.0435587117424,
+        "p50": 1510
+      },
+      "encoder_input_retention_share": {
+        "mean": 1.0
+      },
+      "segments": {
+        "evidence": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "candidate": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "budget": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "action_mask": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        }
+      }
+    }
+  },
+  "by_action": {
+    "ANSWER": {
+      "n": 9643,
+      "truncated_share": 0.0,
+      "unit_retention_share": {
+        "mean": 1.0,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "full_units": {
+        "mean": 540.1980711396868,
+        "p50": 595,
+        "p90": 662,
+        "p95": 674,
+        "max": 803
+      },
+      "retained_units": {
+        "mean": 540.1980711396868,
+        "p50": 595
+      },
+      "full_subwords": {
+        "mean": 1314.6846417090117,
+        "p95": 1593,
+        "max": 1728
+      },
+      "retained_subwords": {
+        "mean": 1314.6846417090117,
+        "p50": 1430
+      },
+      "encoder_input_retention_share": {
+        "mean": 1.0
+      },
+      "segments": {
+        "evidence": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "candidate": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "budget": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "action_mask": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        }
+      }
+    },
+    "SEARCH_BM25": {
+      "n": 228,
+      "truncated_share": 0.0,
+      "unit_retention_share": {
+        "mean": 1.0,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "full_units": {
+        "mean": 343.1535087719298,
+        "p50": 309,
+        "p90": 478,
+        "p95": 492,
+        "max": 527
+      },
+      "retained_units": {
+        "mean": 343.1535087719298,
+        "p50": 309
+      },
+      "full_subwords": {
+        "mean": 900.9868421052631,
+        "p95": 1216,
+        "max": 1301
+      },
+      "retained_subwords": {
+        "mean": 900.9868421052631,
+        "p50": 830
+      },
+      "encoder_input_retention_share": {
+        "mean": 1.0
+      },
+      "segments": {
+        "evidence": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "candidate": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "budget": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "action_mask": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        }
+      }
+    },
+    "SEARCH_DENSE": {
+      "n": 180,
+      "truncated_share": 0.0,
+      "unit_retention_share": {
+        "mean": 1.0,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "full_units": {
+        "mean": 381.8333333333333,
+        "p50": 347,
+        "p90": 484,
+        "p95": 489,
+        "max": 530
+      },
+      "retained_units": {
+        "mean": 381.8333333333333,
+        "p50": 347
+      },
+      "full_subwords": {
+        "mean": 986.3888888888889,
+        "p95": 1220,
+        "max": 1333
+      },
+      "retained_subwords": {
+        "mean": 986.3888888888889,
+        "p50": 949
+      },
+      "encoder_input_retention_share": {
+        "mean": 1.0
+      },
+      "segments": {
+        "evidence": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "candidate": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "budget": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "action_mask": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        }
+      }
+    },
+    "ABSTAIN": {
+      "n": 24942,
+      "truncated_share": 0.0,
+      "unit_retention_share": {
+        "mean": 1.0,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "full_units": {
+        "mean": 540.4242642931601,
+        "p50": 599,
+        "p90": 663,
+        "p95": 675,
+        "max": 776
+      },
+      "retained_units": {
+        "mean": 540.4242642931601,
+        "p50": 599
+      },
+      "full_subwords": {
+        "mean": 1313.3140084997194,
+        "p95": 1591,
+        "max": 1701
+      },
+      "retained_subwords": {
+        "mean": 1313.3140084997194,
+        "p50": 1434
+      },
+      "encoder_input_retention_share": {
+        "mean": 1.0
+      },
+      "segments": {
+        "evidence": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "candidate": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "budget": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        },
+        "action_mask": {
+          "present_share": 1.0,
+          "retained_share": 1.0,
+          "fully_retained_share": 1.0,
+          "char_coverage_mean": 1.0,
+          "char_coverage_p10": 1.0
+        }
+      }
+    }
+  },
+  "caveats": [
+    "Classification inference passes max_len=None and applies no word or subword truncation: all-1.0 retention figures are vacuous, not evidence of model quality.",
+    "Checkpoint config max_len=4096 words applies to training, not this adapter's inference call; max observed input is below that training cap.",
+    "The encoder config declares max_position_embeddings=512, position_biased_input=false and relative_attention=true; this is not an absolute input-length clamp in this DeBERTa v2 encoder. The classification path sends full inputs, but effects on quality at these lengths require model forwards/evaluation.",
+    "Only the tokenizer/processor/schema ran here; no model weights, no forward pass.",
+    "The processor appends '.' when the state does not end in .!? (mirrored here); char offsets are measured on that mutated text.",
+    "GLiNER's cap counts words, not subwords; it must not be compared to Laya's subword max_len."
+  ]
+}

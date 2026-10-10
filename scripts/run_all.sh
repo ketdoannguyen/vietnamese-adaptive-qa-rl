@@ -24,12 +24,39 @@
 # Resume (spec 06 §5): a previous RUNNING row for this profile whose process is no
 #   longer alive aborts the run with exit 3; with --resume those rows are marked
 #   INTERRUPTED (recovery event recorded) and the DAG continues from the last
-#   complete stage. INTERRUPTED is not in src.utils.runs.STATUSES, so those rows are
-#   appended with src.utils.io.append_jsonl (same file, same schema) — reported.
+#   complete stage. --resume also closes each GPU interval a killed invocation left open,
+#   conservatively and fail-closed: only when pgrep definitively proves the stage module
+#   no longer runs (exit 1), and the interval is closed at the recovery instant — an upper
+#   bound on the real allocation end that also charges the idle downtime between the kill
+#   and the recovery. That overbilling is deliberate (never underbill); a precise
+#   device-time correction needs a new mechanism (e.g. device-side accounting), not a
+#   hand-edited ledger. Intervals that cannot be verified (live process, pgrep missing or
+#   exiting with a status other than 0/1, unknown owner/stage) stay open and keep failing
+#   closed. INTERRUPTED is recorded through the standard RunRegistry validator.
 #
 # Retries (spec 06 §6): a stage that dies with an OOM signature is retried up to
 #   limits.max_retries_per_stage times with a generated config overlay that shrinks
-#   the stage's own resource knobs; every retry logs the old -> new config diff.
+#   the stage's own resource knobs; every retry logs the old -> new config diff. A retry
+#   is a fresh GPU launch, so the fail-closed GPU budget gate runs again for it over the
+#   ledger that already includes the attempt that just failed.
+#
+# Overlay forwarding: every stage child is launched with --config carrying the CLI base
+#   overlay merged under the stage's own overlay (a previous retry's reduced-resource
+#   knobs win on conflicts), so children resolve the same experiment namespace
+#   (paths.runs/models/...) the orchestrator gated against; the stage manifest records
+#   that merged overlay and its resolved config sha. With no --config the merged overlay
+#   is empty and the launch is byte-identical to a plain profile launch.
+#
+# Isolation & GPU budget (P0): a real invocation takes an exclusive flock over
+#   outputs/experiments/.run_all.lock before writing anything. It is fixed outside all
+#   overlay-controlled paths: partial overlays cannot split mutual exclusion or GPU
+#   accounting on this one L4. The lock is held by main for the whole invocation, and
+#   stage children never inherit its fd. A second live invocation exits 3 and writes
+#   nothing, while `--dry-run` needs no lock and stays strictly read-only. Every stage
+#   launch is billed in outputs/experiments/gpu_ledger.jsonl (CPU-only stages record
+#   gpu=false and spend nothing); before a GPU stage run_all fails closed when
+#   the ledger is malformed, when an interval from a killed invocation is still open, or
+#   when the cumulative spend has reached limits.max_gpu_hours.
 #
 # `--dry-run` prints the plan, the measured RAM/disk/GPU facts and activates nothing.
 # =============================================================================
@@ -56,6 +83,7 @@ export RUN_ALL_PYTHON="$PYTHON"
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
 import shlex
@@ -69,10 +97,12 @@ REPO = Path(os.environ["RUN_ALL_REPO"])
 PYTHON = os.environ["RUN_ALL_PYTHON"]
 sys.path.insert(0, str(REPO))
 
-from src.utils.config import load_config, resolve, snapshot_config  # noqa: E402
+from src.utils.config import _deep_merge, load_config, resolve, snapshot_config  # noqa: E402
 from src.utils.hashing import sha256_file, sha256_json, sha256_text  # noqa: E402
-from src.utils.io import append_jsonl, atomic_write_json, read_yaml  # noqa: E402
-from src.utils.runs import RunRegistry, git_sha, now_iso  # noqa: E402
+from src.utils.io import atomic_write_json, read_yaml  # noqa: E402
+from src.utils.runs import (  # noqa: E402
+    GpuLedger, GpuLedgerError, LockHeld, OutputNamespaceLock, RunRegistry, git_sha, now_iso,
+)
 
 ORCH_STAGE = "run_all"
 TERMINAL = ("SUCCEEDED", "FAILED", "SKIPPED", "BLOCKED", "NOT_RUN", "INTERRUPTED")
@@ -85,53 +115,65 @@ PROFILES = ("smoke", "small", "pilot", "medium", "full")
 # ------------------------------------------------------------------------------- DAG
 
 def stage_specs(cfg: dict) -> list[dict]:
-    """The DAG for this config. ``row`` = exact registry-key filters for the gate."""
+    """The DAG for this config. ``row`` = exact registry-key filters for the gate.
+
+    ``gpu`` explicitly classifies each stage for the ledger/budget (P0): True when the
+    stage loads or trains neural models on the GPU (dense E5 encoder, reader, Laya) or
+    re-runs that training path; False when it only moves files, works over recorded
+    caches/registries (state cache, Laya prob cache) or writes reports.
+    """
     frozen = ((cfg.get("laya") or {}).get("frozen") or "rlcd")
     regime = None if frozen in (None, "none") else str(frozen)
     return [
         dict(key="download", stage="P1_download", module="src.pipeline.download",
-             args=[], deps=[]),
+             args=[], deps=[], gpu=False),
         dict(key="audit_split", stage="P1_audit_split", module="src.pipeline.audit_split",
-             args=[], deps=["download"]),
+             args=[], deps=["download"], gpu=False),
         dict(key="build_retrieval", stage="P2_retrieval",
-             module="src.pipeline.build_retrieval", args=[], deps=["audit_split"]),
+             module="src.pipeline.build_retrieval", args=[], deps=["audit_split"],
+             gpu=True),
         dict(key="train_reader", stage="P3_reader", module="src.pipeline.train_reader",
-             args=[], deps=["audit_split"]),
+             args=[], deps=["audit_split"], gpu=True),
         dict(key="cache_reader", stage="P3_reader_cache", module="src.pipeline.cache_reader",
-             args=[], deps=["train_reader", "build_retrieval"],
+             args=[], deps=["train_reader", "build_retrieval"], gpu=True,
              row={"splits": ["train_strict", "val_strict"]}),
         dict(key="make_teacher", stage="P5_teacher", module="src.pipeline.make_teacher",
-             args=[], deps=["cache_reader", "build_retrieval"]),
+             args=[], deps=["cache_reader", "build_retrieval"], gpu=False),
         dict(key="train_laya_ce", stage="P5_laya_train", module="src.pipeline.train_laya",
-             args=["--loss", "soft-ce"], deps=["make_teacher"], row={"loss": "soft-ce"}),
+             args=["--loss", "soft-ce"], deps=["make_teacher"], row={"loss": "soft-ce"},
+             gpu=True),
         dict(key="train_laya_rlcd", stage="P5_laya_train", module="src.pipeline.train_laya",
-             args=["--loss", "rlcd"], deps=["make_teacher"], row={"loss": "rlcd"}),
+             args=["--loss", "rlcd"], deps=["make_teacher"], row={"loss": "rlcd"},
+             gpu=True),
         dict(key="cache_laya", stage="P5_cache_laya", module="src.pipeline.cache_laya",
-             args=[], deps=["train_laya_rlcd"], row={"regime": regime}),
+             args=[], deps=["train_laya_rlcd"], row={"regime": regime}, gpu=True),
+        # train_rl pre-warms Laya; a probability-cache miss calls the model on the GPU,
+        # so the launch is billed and budget-guarded like any other GPU stage.
         dict(key="train_rl", stage="P6_rl", module="src.pipeline.train_rl",
-             args=[], deps=["cache_laya", "cache_reader"]),
+             args=[], deps=["cache_laya", "cache_reader"], gpu=True),
         dict(key="select_rl", stage="P6_select", module="src.pipeline.select_rl",
-             args=[], deps=["train_rl"]),
+             args=[], deps=["train_rl"], gpu=False),
         dict(key="train_correctness", stage="B5_correctness",
              module="src.pipeline.train_correctness", args=[],
-             deps=["cache_reader", "build_retrieval"], optional=True),
+             deps=["cache_reader", "build_retrieval"], optional=True, gpu=True),
         dict(key="eval_baselines_val", stage="P7_baselines",
              module="src.pipeline.eval_baselines", args=["--split", "val_strict"],
              deps=["select_rl", "train_correctness", "cache_laya", "build_retrieval",
                    "train_laya_ce"],
-             row={"split": "val_strict"}),
+             row={"split": "val_strict"}, gpu=True),
         dict(key="cache_reader_test", stage="P3_reader_cache",
              module="src.pipeline.cache_reader", args=["--splits", "test_strict"],
-             deps=["select_rl"], row={"splits": ["test_strict"]}),
+             deps=["select_rl"], row={"splits": ["test_strict"]}, gpu=True),
         dict(key="eval_baselines_test", stage="P7_baselines",
              module="src.pipeline.eval_baselines", args=["--split", "test_strict"],
              deps=["eval_baselines_val", "cache_reader_test"], row={"split": "test_strict"},
-             needs_freeze=True),
+             needs_freeze=True, gpu=True),
         dict(key="report", stage="P9_report", module="src.pipeline.report", args=[],
              deps=["download", "audit_split", "build_retrieval", "train_reader",
                    "cache_reader", "make_teacher", "train_laya_ce", "train_laya_rlcd",
                    "cache_laya", "train_rl", "select_rl", "train_correctness",
-                   "cache_reader_test", "eval_baselines_val", "eval_baselines_test"]),
+                   "cache_reader_test", "eval_baselines_val", "eval_baselines_test"],
+             gpu=False),
     ]
 
 
@@ -230,7 +272,8 @@ def manifest_outputs_ok(manifest: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def gate(spec: dict, profile: str, rows: list[dict], manifests: dict) -> tuple[str, str, dict]:
+def gate(spec: dict, profile: str, rows: list[dict], manifests: dict,
+         base_sha: str) -> tuple[str, str, dict]:
     """Verdict RUN|SKIP for one stage plus reason and the overlay it should reuse."""
     status, row = stage_status(rows, spec, profile)
     if status is None:
@@ -246,6 +289,8 @@ def gate(spec: dict, profile: str, rows: list[dict], manifests: dict) -> tuple[s
     manifest = manifests.get(spec["key"])
     if manifest is None:
         return "RUN", "chưa có stage_manifest (outputs/manifests/run_all/%s.json)" % spec["key"], {}
+    if manifest.get("base_config_sha") != base_sha:
+        return "RUN", "config --config hoặc --seed đã đổi kể từ stage_manifest", {}
     overlay = manifest.get("overlay") or {}
     _, cfg_sha = resolved_config_sha(profile, overlay)
     if manifest.get("config_sha") != cfg_sha:
@@ -256,7 +301,7 @@ def gate(spec: dict, profile: str, rows: list[dict], manifests: dict) -> tuple[s
     if not mok:
         return "RUN", f"output của stage_manifest không khớp: {mwhy}", {}
     note = f"đã xong {row.get('run_id')}"
-    if overlay:
+    if cfg_sha != base_sha:
         note += " (đang dùng overlay giảm tài nguyên của lần retry trước)"
     return "SKIP", note, overlay
 
@@ -282,11 +327,11 @@ def transitive(start: str, edges: dict[str, list[str]]) -> set[str]:
     return seen
 
 
-def compute_plan(specs: list[dict], profile: str, rows: list[dict], manifests: dict
-                 ) -> dict[str, tuple[str, str, dict]]:
+def compute_plan(specs: list[dict], profile: str, rows: list[dict], manifests: dict,
+                 base_sha: str) -> dict[str, tuple[str, str, dict]]:
     plan: dict[str, tuple[str, str, dict]] = {}
     for spec in specs:
-        plan[spec["key"]] = gate(spec, profile, rows, manifests)
+        plan[spec["key"]] = gate(spec, profile, rows, manifests, base_sha)
     edges = dependents(specs)
     by_key = {spec["key"]: spec for spec in specs}
     forced: dict[str, str] = {}
@@ -337,41 +382,158 @@ def resource_report() -> list[str]:
 
 # -------------------------------------------------------------------------- execution
 
-def module_alive(module: str) -> bool:
+def module_process_state(module: str) -> str:
+    """Three-state oracle for "is a stage module running?": alive | dead | unknown.
+
+    pgrep exits 0 when it matched at least one process and 1 when it matched none. Any
+    other exit status (usage error, signal, environment failure) is evidence of neither
+    state, and a missing pgrep makes liveness unknowable — both report "unknown" so the
+    caller can fail closed instead of guessing.
+    """
     if not shutil.which("pgrep"):
-        return False
+        return "unknown"
     proc = subprocess.run(["pgrep", "-f", module], capture_output=True, text=True,
                           check=False)
-    return proc.returncode == 0 and proc.stdout.strip() != ""
+    if proc.returncode == 0 and proc.stdout.strip():
+        return "alive"
+    if proc.returncode == 1:
+        return "dead"
+    return "unknown"
 
 
 def find_running(specs: list[dict], profile: str, rows: list[dict]) -> tuple[list[dict], list[str]]:
-    """Split RUNNING stage rows: dead process -> stale (spec 06 §5), live -> busy (abort)."""
+    """Only a provably dead RUNNING stage may be resumed; uncertainty blocks the run."""
     stale: list[dict] = []
     busy: list[str] = []
     for spec in specs:
         status, row = stage_status(rows, spec, profile)
         if status != "RUNNING":
             continue
-        if module_alive(spec["module"]):
-            busy.append(f"{spec['key']} ({spec['module']}, {row.get('run_id')})")
-        else:
+        state = module_process_state(spec["module"])
+        if state == "dead":
             stale.append(row)
+        else:
+            detail = "still running" if state == "alive" else "pgrep status unknown"
+            busy.append(f"{spec['key']} ({spec['module']}, {row.get('run_id')}; {detail})")
     return stale, busy
 
 
 def mark_interrupted(registry_path: Path, stale: list[dict], run_id: str) -> list[str]:
     marked = []
+    registry = RunRegistry(registry_path)
     for row in stale:
-        append_jsonl(registry_path, {
-            "run_id": row.get("run_id"), "stage": row.get("stage"), "status": "INTERRUPTED",
-            "ts": now_iso(), "profile": row.get("profile"),
-            "event": "interrupted", "marked_by": run_id,
-            "reason": "RUNNING nhưng process không còn sống (pgrep không thấy); đánh dấu "
-                      "INTERRUPTED theo spec 06 §5 (INTERRUPTED không có trong STATUSES)",
-        })
+        registry.append(
+            run_id=row.get("run_id"), stage=row.get("stage"), status="INTERRUPTED",
+            profile=row.get("profile"),
+            **{key: row[key] for key in ("loss", "regime", "split", "splits") if key in row},
+            event="interrupted", marked_by=run_id,
+            reason="RUNNING nhưng process không còn sống (pgrep không thấy); đánh dấu "
+                   "INTERRUPTED theo spec 06 §5",
+        )
         marked.append(f"{row.get('stage')}:{row.get('run_id')}")
     return marked
+
+
+def recover_killed_gpu_intervals(ledger: GpuLedger, specs: list[dict], rows: list[dict],
+                                 registry_path: Path, run_id: str, profile: str
+                                 ) -> tuple[list[str], list[str]]:
+    """--resume: close intervals a killed invocation left open, conservatively.
+
+    Fail-closed and never underbill: an interval is closed only when (a) ownership is
+    recorded — its ``run_id`` belongs to a run_all ``start`` row — (b) its ``stage_key``
+    resolves to a DAG module, and (c) pgrep definitively proves that module's process is
+    gone (exit 1). The close instant is then the recovery NOW: an upper bound on the true
+    allocation end that also charges the idle downtime between the kill and the recovery.
+    That overbilling is deliberate — the alternative, closing at the stage log's mtime as a
+    guessed "stop instant" (the previous rule), underbills every silent job, whose log
+    freezes at launch while the GPU stays held. A precise device-time correction needs a
+    new mechanism (e.g. device-side accounting); recovery never pretends to know it.
+    Anything uncertain — a live process, a pgrep that is missing or exits with a status
+    other than 0/1, an unknown owner or stage — leaves the interval open and reported, and
+    the pre-launch GPU gate keeps failing closed on it.
+    """
+    try:
+        opened = ledger.open_intervals()
+    except GpuLedgerError as exc:
+        return [], [f"không đọc được ledger: {exc}"]
+    if not opened:
+        return [], []
+
+    by_key = {spec["key"]: spec for spec in specs}
+    starts = {row.get("run_id") for row in rows
+              if row.get("stage") == ORCH_STAGE and row.get("event") == "start"}
+    recovered: list[str] = []
+    unresolved: list[str] = []
+    for row in opened:
+        interval_id = row.get("interval_id")
+        stage_key = row.get("stage_key")
+        if not row.get("gpu", True) and row.get("run_id") not in starts:
+            continue  # Direct CPU intervals belong to gpu_stage; do not recover them here.
+        if row.get("run_id") not in starts:
+            unresolved.append(f"{interval_id}: không có registry row start cho run "
+                              f"{row.get('run_id')!r} — không xác minh được chủ sở hữu")
+            continue
+        spec = by_key.get(stage_key)
+        if spec is None:
+            unresolved.append(f"{interval_id}: stage_key {stage_key!r} không có trong DAG")
+            continue
+        state = module_process_state(spec["module"])
+        if state == "alive":
+            unresolved.append(f"{interval_id}: {spec['module']} vẫn còn tiến trình sống — "
+                              f"không đóng interval")
+            continue
+        if state == "unknown":
+            unresolved.append(f"{interval_id}: pgrep không kết luận được trạng thái của "
+                              f"{spec['module']} (thiếu pgrep hoặc rc khác 0/1) — không "
+                              f"đóng interval (fail closed)")
+            continue
+        ended = _dt.datetime.now(_dt.timezone.utc)
+        try:
+            seconds = ledger.close_interval(interval_id, status="INTERRUPTED", now=ended)
+        except GpuLedgerError as exc:
+            unresolved.append(f"{interval_id}: không đóng được tại {ended.isoformat()}: {exc}")
+            continue
+        RunRegistry(registry_path).append(
+            run_id=run_id, stage=ORCH_STAGE, status="SUCCEEDED",
+            profile=profile, event="recovered", interval_id=interval_id,
+            stage_key=stage_key, owner_run_id=row.get("run_id"),
+            ended=ended.isoformat(), seconds=round(seconds, 3), gpu=row.get("gpu", True),
+            evidence=f"pgrep -f {spec['module']} rc=1 (không còn tiến trình) lúc "
+                     f"{ended.isoformat()}",
+            reason=("interval GPU bị bỏ ngỏ; đóng tại lúc khôi phục, tính cả thời gian chết"
+                    if row.get("gpu", True) else
+                    "interval CPU bị bỏ ngỏ; đóng tại lúc khôi phục, không tính GPU"),
+        )
+        kind = "GPU" if row.get("gpu", True) else "CPU"
+        recovered.append(f"{stage_key} [{interval_id}] → INTERRUPTED lúc "
+                         f"{ended.isoformat()} ({seconds:.1f}s {kind}, upper bound tại lúc khôi "
+                         f"phục; pgrep xác nhận process đã mất)")
+    return recovered, unresolved
+
+
+def gpu_budget_block(ledger: GpuLedger, max_gpu_hours) -> str | None:
+    """Fail-closed check before one GPU launch (first attempt or OOM retry); returns a
+    reason when it must not run.
+
+    No per-stage GPU forecast exists in this repository (nothing measures or estimates a
+    stage's duration), so only measured facts are enforced: the cumulative ledger spend
+    against limits.max_gpu_hours, and any interval a killed invocation left open (charged
+    to now by the ledger and refused here). The projected-overshoot check is therefore not
+    performed — inventing a forecast would be worse than not projecting.
+    """
+    try:
+        open_gpu = [row for row in ledger.open_intervals() if row.get("gpu", True)]
+    except GpuLedgerError as exc:
+        return (f"ledger GPU hỏng — fail closed, không mở stage GPU nào: {exc}")
+    if open_gpu:
+        ids = ", ".join(str(row.get("interval_id")) for row in open_gpu)
+        return (f"còn interval GPU chưa đóng từ invocation bị kill ({ids}) — không mở "
+                f"stage GPU mới (fail closed)")
+    if not ledger.budget_ok(max_gpu_hours):
+        spent_hours = ledger.spent_seconds() / 3600
+        return (f"vượt ngân sách GPU tích luỹ (budget): đã dùng {spent_hours:.2f}h >= hạn mức "
+                f"limits.max_gpu_hours={max_gpu_hours}")
+    return None
 
 
 def oom_retry_overlay(spec: dict, profile: str, overlay: dict, attempt: int
@@ -441,11 +603,16 @@ def run_stage(spec: dict, profile: str, seed: int | None, overlay: dict,
     cmd += extra_args
     print(f"    $ {shlex.join(cmd)}")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "w", encoding="utf-8") as log:
+    # Line-buffered: every stage-log line hits disk immediately, so the log is a faithful
+    # live trace. Recovery deliberately does NOT read its mtime as a "stop instant": a
+    # silent job's log freezes at launch while the GPU stays held, which would underbill.
+    with open(log_path, "w", encoding="utf-8", buffering=1) as log:
         log.write(f"# {' '.join(cmd)}\n")
-        log.flush()
+        # close_fds: a child must never inherit the run_all lock fd — flock follows the open
+        # file description, so an orphaned child holding it would keep the namespace locked
+        # after this process dies.
         proc = subprocess.Popen(cmd, cwd=str(REPO), stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
+                                stderr=subprocess.STDOUT, text=True, close_fds=True)
         captured: list[str] = []
         for line in proc.stdout:
             sys.stdout.write("      " + line)
@@ -467,9 +634,9 @@ def read_manifests(path: Path) -> dict:
 
 
 def write_stage_manifest(path: Path, spec: dict, profile: str, registry_row: dict,
-                         registry_run_id: str, cfg_sha: str, overlay: dict, command: list[str],
-                         started: str, ended: str, seconds: float, log_rel: str,
-                         input_sha: dict) -> None:
+                         registry_run_id: str, cfg_sha: str, base_sha: str, overlay: dict,
+                         command: list[str], started: str, ended: str, seconds: float,
+                         log_rel: str, input_sha: dict) -> None:
     outputs = {}
     for artifact, meta in (registry_row.get("artifacts") or {}).items():
         try:
@@ -482,7 +649,8 @@ def write_stage_manifest(path: Path, spec: dict, profile: str, registry_row: dic
         "registry_run_id": registry_run_id, "module": spec["module"], "profile": profile,
         "regime": (spec.get("row") or {}).get("regime")
         or (spec.get("row") or {}).get("loss") or (spec.get("row") or {}).get("split"),
-        "command": shlex.join(command), "config_sha": cfg_sha, "overlay": overlay,
+        "command": shlex.join(command), "config_sha": cfg_sha,
+        "base_config_sha": base_sha, "overlay": overlay,
         "code_git_sha": git_sha(REPO), "input_sha": input_sha, "outputs_sha": outputs,
         "started_utc": started, "ended_utc": ended, "seconds": round(seconds, 3),
         "exit_code": 0, "log": log_rel,
@@ -513,17 +681,32 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="in kế hoạch + tài nguyên đo được; không chạy stage, không ghi gì")
     parser.add_argument("--resume", action="store_true",
-                        help="đánh dấu INTERRUPTED các RUNNING cũ đã chết rồi chạy tiếp")
+                        help="đánh dấu INTERRUPTED các RUNNING cũ đã chết và đóng interval "
+                             "GPU bỏ ngỏ khi đã có bằng chứng process stage không còn "
+                             "(pgrep rc=1); interval đóng tại lúc khôi phục — upper bound, "
+                             "có thể tính dư thời gian chết — rồi chạy tiếp")
     parser.add_argument("--stop-after", default=None, metavar="STAGE_KEY",
                         help="dừng ngay sau khi xử lý xong stage này (dùng cho kiểm thử)")
     parser.add_argument("--zip", action="store_true",
                         help="chuyển --zip cho stage report (tuỳ chọn, mặc định tắt)")
     args = parser.parse_args(argv)
 
-    base_overlay = read_yaml(args.config) if args.config else {}
+    base_overlay = (read_yaml(args.config) or {}) if args.config else {}
+    if not isinstance(base_overlay, dict):
+        parser.error("--config must contain a YAML mapping")
+    if args.seed is not None:
+        base_overlay = _deep_merge(base_overlay, {"seed": args.seed})
     profile = args.profile or load_config()["data"]["profile"]
     cfg, base_sha = resolved_config_sha(profile, base_overlay)
     specs = stage_specs(cfg)
+    experiment_root = (REPO / "outputs/experiments").resolve()
+    if (not args.dry_run and any(
+            (REPO / value).resolve().is_relative_to(experiment_root)
+            for value in (cfg.get("paths") or {}).values() if isinstance(value, str))):
+        print("DỪNG: run_all không có forecast/watchdog cho GPU stage và report chưa "
+              "được cô lập; experiment phải dùng scripts/gpu_stage.py cho các GPU "
+              "stage có giới hạn, không chạy DAG run_all này.", file=sys.stderr)
+        return 3
     keys = [spec["key"] for spec in specs]
     if args.stop_after is not None and args.stop_after not in keys:
         print(f"--stop-after: không có stage {args.stop_after!r}; hợp lệ: {', '.join(keys)}",
@@ -534,7 +717,7 @@ def main(argv: list[str]) -> int:
     manifests_dir = resolve(cfg, "manifests") / "run_all"
     rows = read_registry(registry_path)
     manifests = read_manifests(manifests_dir)
-    plan = compute_plan(specs, profile, rows, manifests)
+    plan = compute_plan(specs, profile, rows, manifests, base_sha)
 
     print("=" * 79)
     print(f"run_all.sh — profile={profile} config_sha={short(base_sha)} dry_run={args.dry_run} "
@@ -547,18 +730,46 @@ def main(argv: list[str]) -> int:
         for line in resource_report():
             print(line)
         gpu_hours = ((cfg.get("limits") or {}).get("max_gpu_hours"))
-        print(f"  ngân sách: limits.max_gpu_hours={gpu_hours} "
-              f"(đối chiếu theo từng invocation run_all, chưa có đồng hồ tích luỹ)")
+        print(f"  ngân sách: limits.max_gpu_hours={gpu_hours} (đối chiếu tích luỹ từ "
+              f"outputs/experiments/gpu_ledger.jsonl trước mỗi stage GPU)")
         print(f"  gợi ý: chạy `bash scripts/preflight.sh` trước khi chạy thật.")
         print("DRY-RUN: không chạy stage nào, không ghi registry/stage_manifest.")
         return 0
 
+    # Khoá cố định ở project root (ngoài mọi path mà --config có thể dịch chuyển):
+    # một máy/L4 chỉ có một run_all đang ghi, kể cả các namespace riêng. Tránh ghi đè
+    # artifact khi chỉ một phần paths được overlay và tránh chia nhỏ ngân sách GPU.
+    # close_fds=True bên dưới ngăn stage con thừa hưởng fd; dry-run không lấy khoá.
+    lock_path = REPO / "outputs/experiments/.run_all.lock"
+    lock = OutputNamespaceLock(lock_path)
+    try:
+        lock.acquire()
+    except LockHeld as exc:
+        print(f"DỪNG: namespace registry/outputs đang bị khoá độc quyền bởi một run_all "
+              f"khác (lock): {exc}", file=sys.stderr)
+        print("Không ghi gì; chờ invocation kia kết thúc rồi chạy lại.", file=sys.stderr)
+        return 3
+
+    ledger = GpuLedger(REPO / "outputs/experiments/gpu_ledger.jsonl")
+    try:
+        ledger.open_intervals()  # validate even before CPU-only stages touch the registry
+    except GpuLedgerError as exc:
+        print(f"DỪNG: ledger GPU hỏng — không khởi chạy stage: {exc}", file=sys.stderr)
+        return 3
+    # A prior invocation may have finished between the lock-free preview and lock acquire.
+    # Gate only against registry and manifests observed while holding the writer lock.
+    rows = read_registry(registry_path)
+    manifests = read_manifests(manifests_dir)
+    plan = compute_plan(specs, profile, rows, manifests, base_sha)
+
     stale, busy = find_running(specs, profile, rows)
     if busy:
-        print("DỪNG: stage đang chạy ở tiến trình khác (không chạy chồng):", file=sys.stderr)
+        print("DỪNG: stage còn RUNNING hoặc pgrep không xác minh được tiến trình "
+              "(không chạy chồng):", file=sys.stderr)
         for item in busy:
             print(f"  - {item}", file=sys.stderr)
-        print("Chờ tiến trình đó kết thúc rồi chạy lại run_all.", file=sys.stderr)
+        print("Chờ tiến trình kết thúc và xác minh pgrep rồi chạy lại run_all.",
+              file=sys.stderr)
         return 3
     if stale and not args.resume:
         print("DỪNG: có stage còn RUNNING mà process đã chết:", file=sys.stderr)
@@ -582,13 +793,21 @@ def main(argv: list[str]) -> int:
                     config_snapshot=str(snapshot_path.relative_to(REPO)),
                     seed=args.seed, log_dir=str(log_dir.relative_to(REPO)))
 
+    if args.resume:
+        recovered, unresolved = recover_killed_gpu_intervals(
+            ledger, specs, rows, registry_path, run_id, profile)
+        for line in recovered:
+            print(f"RECOVERY LEDGER: {line}")
+        for line in unresolved:
+            print(f"CẢNH BÁO LEDGER: {line}", file=sys.stderr)
+
     if stale:
         marked = mark_interrupted(registry_path, stale, run_id)
         registry.append(run_id=run_id, stage=ORCH_STAGE, status="SUCCEEDED",
                         event="recovery", marked=marked, profile=profile,
                         note="các RUNNING cũ đã được đánh dấu INTERRUPTED trước khi tiếp tục")
         rows = read_registry(registry_path)
-        plan = compute_plan(specs, profile, rows, manifests)
+        plan = compute_plan(specs, profile, rows, manifests, base_sha)
         print(f"RECOVERY: đã đánh dấu INTERRUPTED {len(marked)} dòng: {', '.join(marked)}")
 
     print_plan(specs, plan, profile)
@@ -597,7 +816,7 @@ def main(argv: list[str]) -> int:
     failures: list[str] = []
     started_all = time.time()
     max_retries = int((cfg.get("limits") or {}).get("max_retries_per_stage", 2))
-    budget_seconds = float((cfg.get("limits") or {}).get("max_gpu_hours") or 0) * 3600
+    max_gpu_hours = (cfg.get("limits") or {}).get("max_gpu_hours")
 
     def event(**extra) -> None:
         registry.append(run_id=run_id, stage=ORCH_STAGE, **extra)
@@ -616,13 +835,6 @@ def main(argv: list[str]) -> int:
                 print(f"  --stop-after {spec['key']}: dừng theo yêu cầu.")
                 break
             continue
-
-        if budget_seconds and (time.time() - started_all) > budget_seconds:
-            exit_code = 1
-            failures.append(f"vượt ngân sách GPU trước stage {spec['key']}")
-            print(f"  DỪNG: vượt limits.max_gpu_hours; chưa chạy {spec['key']} và các stage sau.",
-                  file=sys.stderr)
-            break
 
         if spec.get("optional") and not (REPO / (spec["module"].replace(".", "/") + ".py")).is_file():
             reason = f"chưa có module {spec['module']} — bỏ qua (các stage khác chạy tiếp)"
@@ -643,17 +855,54 @@ def main(argv: list[str]) -> int:
                       registry_stage=spec["stage"], reason=reason)
                 continue
 
+        try:
+            open_same_stage = [row for row in ledger.open_intervals()
+                               if row.get("stage_key") == spec["key"]]
+        except GpuLedgerError as exc:
+            open_same_stage = []
+            blocked = f"ledger hỏng — không mở stage: {exc}"
+        else:
+            blocked = (f"còn interval {spec['key']} chưa đóng — không mở trùng stage"
+                       if open_same_stage else None)
+        if not blocked and spec["gpu"]:
+            blocked = gpu_budget_block(ledger, max_gpu_hours)
+        if blocked:
+            exit_code = 1
+            failures.append(f"{spec['key']}: {blocked}")
+            print(f"  DỪNG: {blocked}", file=sys.stderr)
+            break
+
         stage_started = now_iso()
         stage_clock = time.time()
         attempts = 0
         extra_args = ["--zip"] if (spec["key"] == "report" and args.zip) else []
-        current_overlay = dict(overlay)
+        # The overlay every launch receives is the CLI base overlay merged under the stage's
+        # own overlay (a previous retry's reduced-resource knobs win on conflicts). Children
+        # must resolve the same config the orchestrator planned against, or an overlay moving
+        # the experiment namespace (e.g. paths.runs/paths.models) would leave them writing
+        # historical artifacts while the orchestrator believes it is isolated. On a
+        # no-overlay baseline this is {} and the launch is byte-identical to before.
+        current_overlay = _deep_merge(base_overlay, overlay)
         outcome = None
+        failure_detail = None
         while True:
             attempts += 1
             log_path = log_dir / f"{index:02d}_{spec['key']}_r{attempts}.log"
+            # One open per launch, closed below with the launch's terminal status; the
+            # ledger bills per interval, so retries are separate disjoint allocations
+            # (no double counting) and a killed invocation stays charged via its open row.
+            interval_id = ledger.open_interval(run_id=run_id, stage_key=spec["key"],
+                                               stage=spec["stage"], gpu=spec["gpu"])
             rc, output = run_stage(spec, profile, args.seed, current_overlay, log_path,
                                    extra_args)
+            try:
+                ledger.close_interval(interval_id, status="SUCCEEDED" if rc == 0 else "FAILED")
+            except (GpuLedgerError, OSError) as exc:
+                outcome = "FAILED"
+                failure_detail = (f"{spec['key']}: không đóng được ledger interval "
+                                  f"{interval_id}; dừng fail-closed: {exc}")
+                print(f"  DỪNG: {failure_detail}", file=sys.stderr)
+                break
             if rc == 0:
                 outcome = "SUCCEEDED"
                 break
@@ -664,6 +913,17 @@ def main(argv: list[str]) -> int:
                 break
             oom = rc == 137 or any(sig in output for sig in OOM_SIGNATURES)
             if oom and attempts <= max_retries:
+                # A retry is a fresh GPU launch: the fail-closed budget gate must run again
+                # for it, over the ledger that already includes the attempt that just
+                # failed — otherwise the retry relaunches a stage whose spend has already
+                # reached limits.max_gpu_hours.
+                if spec["gpu"]:
+                    blocked = gpu_budget_block(ledger, max_gpu_hours)
+                    if blocked:
+                        outcome = "FAILED"
+                        failure_detail = f"{spec['key']}: {blocked}"
+                        print(f"  DỪNG retry: {blocked}", file=sys.stderr)
+                        break
                 new_overlay, diffs = oom_retry_overlay(spec, profile, current_overlay, attempts)
                 if not diffs:
                     print(f"  OOM nhưng không có knob giảm tài nguyên cho {spec['key']}; "
@@ -686,7 +946,8 @@ def main(argv: list[str]) -> int:
 
         if outcome == "FAILED":
             exit_code = 1
-            failures.append(f"{spec['key']} thất bại (xem {log_path.name})")
+            failures.append(failure_detail
+                            or f"{spec['key']} thất bại (xem {log_path.name})")
             event(status="FAILED", event="stage", stage_key=spec["key"],
                   registry_stage=spec["stage"], attempts=attempts,
                   seconds=round(seconds, 3), reason=f"rc!=0, log={log_path.name}")
@@ -726,7 +987,7 @@ def main(argv: list[str]) -> int:
         _, stage_cfg_sha = resolved_config_sha(profile, current_overlay)
         manifest_path = manifests_dir / f"{spec['key']}.json"
         write_stage_manifest(manifest_path, spec, profile, row, row.get("run_id"),
-                             stage_cfg_sha, current_overlay,
+                             stage_cfg_sha, base_sha, current_overlay,
                              [PYTHON, "-m", spec["module"], "--profile", profile,
                               *spec["args"]], stage_started, stage_ended, seconds,
                              str(log_path.relative_to(REPO)), input_sha)

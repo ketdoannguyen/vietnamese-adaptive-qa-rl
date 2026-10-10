@@ -1,0 +1,27 @@
+# P0 GLiNER gate - artifact pin record (2026-10-09)
+# Runtime: Python 3.10.12, uv-managed venv .venv-gliner (repo root)
+# env freeze: env/lock.txt (53 pkgs; datasets absent)
+
+# --- wheels (sha256 from index metadata captured in uv cache .http sidecars) ---
+6f7c4cba0ef3173636d8bd9404aa94d4e0ccf36d4b4b9a0d27d740dd2d3236c3  gliner2-2.0.0-py3-none-any.whl  (PyPI)
+524039bee1fdb7e96f943768335ba964a8ad2a7d5e41525da6dc4897ae27ed16  torch-2.14.1+cu130-cp310-cp310-manylinux_2_28_x86_64.whl  (download.pytorch.org/whl/cu130)
+106ab6077ff72c54d21577f9af5970e34bac7582cb14209f7b2b511e322a4eae  peft-0.21.2-py3-none-any.whl  (PyPI)
+4c9e9de11333ddfe5114bc872c9f370509198acf0b87a832a0ab9458e2bd0550  transformers-4.57.6-py3-none-any.whl  (PyPI)
+97eacca0b73e45cb867dbf8c5d5d4dc32219544300e0c8992c7334dc2ef33cec  accelerate-1.15.0-py3-none-any.whl  (PyPI)
+48f0c8eac16145dfce371e9d2d7772854a4f591bcb56c9cf548accf531d54270  huggingface_hub-0.36.2-py3-none-any.whl  (PyPI)
+89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2  protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl  (PyPI; required for transformers tokenizer fallback shim)
+4fb41211d2333eb930a51e0546a65999761cf1f572a4da56ef9b8a62966c06f2  regex-2026.9.29-cp310-cp310-manylinux_2_28_x86_64.whl  (PyPI)
+c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73  tqdm-4.70.1-py3-none-any.whl  (PyPI)
+# note: tokenizers 0.22.2 / safetensors 0.8.0 / numpy 2.2.6 .http sidecars not retained in uv cache at hash-extraction time; versions pinned in env/lock.txt
+
+# --- HF checkpoint: fastino/GLiNER2.5-multi-Decide ---
+# revision (main): e173bca1f0c4217d7a55b3b0c705d5ece8a0218d ; license Apache-2.0
+9efe0f88c99f2aa794452e9559dc60e98d60d9fa2bf1b60cf2710411b6da5b4e  hf/model/model.safetensors  (matches HF LFS oid)
+aa29cd584316b61b0bfed94d03ee1cfdaf28b46a37686293742929c49b8bd2f7  hf/model/config.json  (= hf/config.json)
+d0ebbcb8b458e285a39e12cc315cbaf3d1c6f631e7281e6b22dd5b4071183f83  hf/encoder_config.json  (transformers_version 5.17.0 - cross-env skew source)
+c62446df87ae18ec98b133f8f84fc449a07cc89bbf8ef192a4cb5f9c53777a7a  hf/model/tokenizer.json
+fd4a31dc2f1f17e31638c5f0e783b81cdb2fbe6bddd116a8d9e5d50d78148cf1  hf/model/tokenizer_config.json  (legacy list-valued extra_special_tokens)
+55531b81804b6c8160d41de57ff9559ca20b2f3779ab6e36e471dcd51127d92b  hf/README.md
+d8c9ff9ffbdb4cbef04670aa482ba8ec1343f4b6e2b4835232768b5c6947d055  hf/model_info.json
+f0c6608692ff2d743b0c54f39df20296131572650da7f7da4ae7436aa7e3d62d  hf/tree.json
+c88242139bdbde7194b1c05bfc77cd5a9ef2d975040a15708211a09700296e32  hf/SKILL.md

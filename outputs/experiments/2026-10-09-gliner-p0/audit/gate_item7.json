@@ -1,0 +1,526 @@
+{
+  "env": {
+    "python": "3.10.12",
+    "executable": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/.venv-gliner/bin/python",
+    "torch": "2.14.1+cu130",
+    "transformers": "4.57.6",
+    "peft": "0.21.2",
+    "gliner2": "2.0.0",
+    "cuda_available": true,
+    "device_name": "NVIDIA L4",
+    "bf16_supported": true
+  },
+  "fixture": {
+    "path": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/fixtures/lora_states_train.jsonl",
+    "rows": 40,
+    "qids": [
+      "train:0005-0001-0004",
+      "train:0007-0003-0004",
+      "train:0010-0024-0002",
+      "train:0018-0013-0005",
+      "train:0020-0007-0002",
+      "train:0024-0004-0006",
+      "train:0027-0051-0002",
+      "train:0030-0001-0005",
+      "train:0032-0037-0009",
+      "train:0035-0002-0006",
+      "train:0037-0006-0001",
+      "train:0041-0001-0004",
+      "train:0043-0004-0006",
+      "train:0045-0059-0001",
+      "train:0049-0008-0008",
+      "train:0054-0032-0006",
+      "train:0057-0072-0007",
+      "train:0060-0002-0002",
+      "train:0062-0025-0003",
+      "train:0066-0002-0002",
+      "train:0069-0003-0003",
+      "train:0071-0030-0005",
+      "train:0074-0015-0008",
+      "train:0076-0013-0003",
+      "train:0080-0004-0005",
+      "train:0083-0010-0007",
+      "train:0088-0023-0004",
+      "train:0091-0006-0004",
+      "train:0093-0017-0007",
+      "train:0096-0001-0005",
+      "train:0098-0005-0004",
+      "train:0105-0001-0005",
+      "train:0108-0004-0001",
+      "train:0110-0017-0004",
+      "train:0115-0002-0009",
+      "train:0117-0044-0005",
+      "train:0120-0024-0008",
+      "train:0124-0011-0007",
+      "train:0128-0006-0006",
+      "train:0135-0003-0002"
+    ],
+    "action_counts": {
+      "ANSWER": 7,
+      "SEARCH_BM25": 0,
+      "SEARCH_DENSE": 0,
+      "ABSTAIN": 33
+    }
+  },
+  "pinned_checkpoint": {
+    "dir": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/hf/model",
+    "observed_sha256": {
+      "hf/model/model.safetensors": "9efe0f88c99f2aa794452e9559dc60e98d60d9fa2bf1b60cf2710411b6da5b4e",
+      "hf/model/config.json": "aa29cd584316b61b0bfed94d03ee1cfdaf28b46a37686293742929c49b8bd2f7",
+      "hf/model/tokenizer.json": "c62446df87ae18ec98b133f8f84fc449a07cc89bbf8ef192a4cb5f9c53777a7a"
+    },
+    "recorded_sha256": {
+      "hf/model/model.safetensors": "9efe0f88c99f2aa794452e9559dc60e98d60d9fa2bf1b60cf2710411b6da5b4e",
+      "hf/model/config.json": "aa29cd584316b61b0bfed94d03ee1cfdaf28b46a37686293742929c49b8bd2f7",
+      "hf/model/tokenizer.json": "c62446df87ae18ec98b133f8f84fc449a07cc89bbf8ef192a4cb5f9c53777a7a"
+    },
+    "matches_recorded_pins": {
+      "hf/model/model.safetensors": true,
+      "hf/model/config.json": true,
+      "hf/model/tokenizer.json": true
+    }
+  },
+  "training": {
+    "steps": 30,
+    "epochs": 2,
+    "seconds": 24.16,
+    "samples_per_second": 2.486,
+    "losses": [
+      0.6272225379943848,
+      0.9429737329483032,
+      1.241842269897461,
+      0.5658807754516602,
+      0.5208932161331177,
+      0.42632728815078735,
+      0.46574023365974426,
+      0.563740074634552,
+      0.5417555570602417,
+      0.4338012635707855,
+      0.16852006316184998,
+      0.2811514437198639,
+      0.24058042466640472,
+      0.22659921646118164,
+      0.5890370607376099,
+      0.052335191518068314,
+      0.011927871033549309,
+      0.3354851007461548,
+      0.32669326663017273,
+      0.6356846690177917,
+      0.7541100382804871,
+      0.19036316871643066,
+      0.4391723871231079,
+      0.39146658778190613,
+      0.17748665809631348,
+      0.013484233058989048,
+      0.4264480769634247,
+      0.25286251306533813,
+      0.054198700934648514,
+      0.009535130113363266
+    ],
+    "grad_norms": [
+      0.5389406681060791,
+      2.8610126972198486,
+      6.443019866943359,
+      1.2474424839019775,
+      1.8428771495819092,
+      1.9176172018051147,
+      1.549932599067688,
+      0.8960146903991699,
+      2.0131146907806396,
+      1.4763264656066895,
+      1.2685893774032593,
+      1.3667279481887817,
+      2.4759912490844727,
+      0.7569468021392822,
+      2.6541528701782227,
+      0.8248722553253174,
+      0.48893508315086365,
+      2.678541898727417,
+      0.5973390340805054,
+      4.127957344055176,
+      9.541282653808594,
+      1.8596895933151245,
+      2.1215505599975586,
+      2.450725793838501,
+      1.9931232929229736,
+      0.3278845548629761,
+      2.958667278289795,
+      1.6218496561050415,
+      0.8956122398376465,
+      0.22722207009792328
+    ]
+  },
+  "weights": {
+    "lora_tensors": 144,
+    "lora_tensors_changed": 144,
+    "lora_digest_before": "26727f35963134ace1642712d3432eb24cfc3870e6b8a737122f86eec8b55d4b",
+    "lora_digest_after": "36d88d0605e054888e3a4460f20efae5222e1d9a0a091d2970ed7f44e5a1298a",
+    "lora_max_abs_delta": 0.006542660761624575,
+    "lora_delta_l2": 2.9740217903429764,
+    "lora_zeros_before": 663552,
+    "base_tensors": 334,
+    "base_tensors_changed": 0,
+    "base_digest_before": "d3ca71b764efdd779644f71ef26cda9a56b4055dec9bd621a3d1c27aceeb8748",
+    "base_digest_after": "d3ca71b764efdd779644f71ef26cda9a56b4055dec9bd621a3d1c27aceeb8748",
+    "base_max_abs_delta": 0.0
+  },
+  "adapter_save": {
+    "dir": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/audit/lora_train_run/final",
+    "files": [
+      [
+        "README.md",
+        5322
+      ],
+      [
+        "adapter_config.json",
+        1310
+      ],
+      [
+        "adapter_model.safetensors",
+        5329152
+      ]
+    ],
+    "total_bytes": 5335784,
+    "peft_type": "LORA",
+    "r": 8,
+    "lora_alpha": 16.0,
+    "target_modules": [
+      "dense",
+      "query_proj",
+      "value_proj",
+      "key_proj"
+    ],
+    "base_model_name_or_path": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/hf/model",
+    "adapter_model_sha256": "7291f45993186eb9d78ef9d2b14bcda91d5a54e4a5d4e7ecd4abf89e6018540e",
+    "standalone_load_error": "OSError: Can't load the configuration of '/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/audit/lora_train_run/final/config.json'. If you were trying to load it from 'https://huggingface.co/models', make sure you don't have a local directory with the same n"
+  },
+  "predictions": {
+    "n_states": 40,
+    "pre_save_vs_post_reload": {
+      "max_abs_logit_diff": 0.0,
+      "max_abs_prob_diff": 0.0,
+      "argmax_agreement": 1.0,
+      "tolerance_logit": 0.05,
+      "tolerance_prob": 0.01
+    },
+    "trained_vs_base_adapter_disabled": {
+      "max_abs_logit_diff": 9.0859375,
+      "argmax_changed": 33
+    },
+    "pre_save_argmax": [
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN"
+    ],
+    "base_argmax": [
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "ABSTAIN",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_BM25",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "ABSTAIN",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "ABSTAIN",
+      "ABSTAIN",
+      "ABSTAIN",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "ABSTAIN",
+      "ABSTAIN",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE",
+      "SEARCH_DENSE"
+    ]
+  },
+  "resources": {
+    "elapsed_seconds": 75.34,
+    "train_seconds": 24.16,
+    "peak_vram_allocated_mb": 9635.4,
+    "peak_vram_reserved_mb": 21070.0
+  },
+  "verdict": "PASS",
+  "checks": [
+    {
+      "name": "cuda_available",
+      "status": "PASS",
+      "detail": "NVIDIA L4"
+    },
+    {
+      "name": "fixture_size_20_to_50",
+      "status": "PASS",
+      "detail": {
+        "rows": 40
+      }
+    },
+    {
+      "name": "fixture_criteria_cover_action_set",
+      "status": "PASS",
+      "detail": [
+        "ABSTAIN",
+        "ANSWER",
+        "SEARCH_BM25",
+        "SEARCH_DENSE"
+      ]
+    },
+    {
+      "name": "fixture_single_instruction_and_criteria",
+      "status": "PASS",
+      "detail": "identical instruction/criteria across fixture rows"
+    },
+    {
+      "name": "fixture_labels_are_train_expected",
+      "status": "PASS",
+      "detail": "every true_label is one of the four actions"
+    },
+    {
+      "name": "pinned_checkpoint_hashes_match_record",
+      "status": "PASS",
+      "detail": {
+        "hf/model/model.safetensors": true,
+        "hf/model/config.json": true,
+        "hf/model/tokenizer.json": true
+      }
+    },
+    {
+      "name": "schema_exclusive_softmax_contract",
+      "status": "PASS",
+      "detail": {
+        "is_exclusive": true,
+        "labels": [
+          "ANSWER",
+          "SEARCH_BM25",
+          "SEARCH_DENSE",
+          "ABSTAIN"
+        ]
+      }
+    },
+    {
+      "name": "model_architecture_is_boundary",
+      "status": "PASS",
+      "detail": "boundary"
+    },
+    {
+      "name": "strict_training_on",
+      "status": "PASS",
+      "detail": {
+        "strict_training": true,
+        "ignore_nonfinite_losses": false
+      }
+    },
+    {
+      "name": "precision_flags_strict",
+      "status": "PASS",
+      "detail": {
+        "fp16": false,
+        "bf16": true,
+        "_precision_explicit": true
+      }
+    },
+    {
+      "name": "max_steps_bounded",
+      "status": "PASS",
+      "detail": 30
+    },
+    {
+      "name": "only_lora_params_trainable",
+      "status": "PASS",
+      "detail": {
+        "lora_tensors": 144,
+        "trainable_non_lora": [],
+        "trainable_params": 1327104,
+        "total_params": 288682263,
+        "trainable_pct": 0.4597
+      }
+    },
+    {
+      "name": "training_steps_taken",
+      "status": "PASS",
+      "detail": 30
+    },
+    {
+      "name": "losses_all_finite",
+      "status": "PASS",
+      "detail": {
+        "n": 30,
+        "first": 0.6272225379943848,
+        "last": 0.009535130113363266,
+        "min": 0.009535130113363266,
+        "max": 1.241842269897461
+      }
+    },
+    {
+      "name": "grad_norms_all_finite_positive",
+      "status": "PASS",
+      "detail": {
+        "n": 30,
+        "first": 0.5389406681060791,
+        "last": 0.22722207009792328,
+        "max": 9.541282653808594
+      }
+    },
+    {
+      "name": "lora_weights_changed",
+      "status": "PASS",
+      "detail": {
+        "changed": 144,
+        "of": 144,
+        "max_abs_delta": 0.006542660761624575,
+        "l2_delta": 2.9740217903429764,
+        "example": [
+          "base_model.model.encoder.encoder.layer.0.attention.output.dense.lora_A.default.weight",
+          "base_model.model.encoder.encoder.layer.0.attention.output.dense.lora_B.default.weight",
+          "base_model.model.encoder.encoder.layer.0.attention.self.key_proj.lora_A.default.weight"
+        ]
+      }
+    },
+    {
+      "name": "frozen_base_weights_bitwise_unchanged",
+      "status": "PASS",
+      "detail": {
+        "changed": 0,
+        "of": 334,
+        "max_abs_delta": 0.0
+      }
+    },
+    {
+      "name": "trainer_saved_final_adapter",
+      "status": "PASS",
+      "detail": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/audit/lora_train_run/final"
+    },
+    {
+      "name": "adapter_is_peft_lora",
+      "status": "PASS",
+      "detail": "LORA"
+    },
+    {
+      "name": "adapter_points_at_pinned_base",
+      "status": "PASS",
+      "detail": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/experiments/2026-10-09-gliner-p0/hf/model"
+    },
+    {
+      "name": "adapter_alone_is_not_a_complete_model",
+      "status": "PASS",
+      "detail": "AutoExtractor.from_pretrained(adapter_dir) must fail"
+    },
+    {
+      "name": "reload_lora_module_names_match",
+      "status": "PASS",
+      "detail": {
+        "reloaded": 72,
+        "trained": 72
+      }
+    },
+    {
+      "name": "reload_predictions_match_pre_save",
+      "status": "PASS",
+      "detail": {
+        "max_abs_logit_diff": 0.0,
+        "max_abs_prob_diff": 0.0,
+        "argmax_equal": true
+      }
+    },
+    {
+      "name": "adapter_changes_predictions",
+      "status": "PASS",
+      "detail": {
+        "max_abs_logit_diff_vs_disabled_adapter": 9.0859375,
+        "argmax_changed": 33
+      }
+    },
+    {
+      "name": "elapsed_under_timeout_budget",
+      "status": "PASS",
+      "detail": {
+        "elapsed_seconds": 75.34,
+        "timeout_seconds": 600
+      }
+    }
+  ],
+  "gate_config": {
+    "num_epochs": 2,
+    "max_steps": 30,
+    "batch_size": 2,
+    "gradient_accumulation_steps": 1,
+    "encoder_lr": 1e-05,
+    "task_lr": 0.0005,
+    "weight_decay": 0.01,
+    "fp16": false,
+    "bf16": true,
+    "use_lora": true,
+    "lora_r": 8,
+    "lora_alpha": 16.0,
+    "lora_dropout": 0.05,
+    "lora_target_modules": [
+      "encoder"
+    ],
+    "save_adapter_only": true,
+    "eval_strategy": "no",
+    "logging_steps": 1,
+    "seed": 42,
+    "num_workers": 0,
+    "max_len": 4096,
+    "strict_training": true
+  },
+  "finished_utc": "2026-10-09T18:08:01Z",
+  "total_seconds": 75.34
+}

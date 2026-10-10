@@ -93,6 +93,19 @@ def write_registry(root: Path, rows) -> Path:
 
 # --------------------------------------------------------------------------- the sketch
 
+def test_experiment_report_refuses_before_writing_historical_access_log(world):
+    cfg, root = world
+    cfg["paths"]["reports"] = str(root / "outputs/experiments/probe/reports")
+    access_log = root / report.TEST_ACCESS_LOG
+    access_log.parent.mkdir(parents=True, exist_ok=True)
+    access_log.write_text("historical access\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="experiment.*report"):
+        run_report(cfg)
+    assert access_log.read_text(encoding="utf-8") == "historical access\n"
+    assert not (root / "outputs/experiments/probe/reports").exists()
+    assert not (root / "outputs/runs/index.jsonl").exists()
+
+
 def test_every_experiment_gets_a_not_run_row_and_never_a_zero(world):
     cfg, root = world
     summary = run_report(cfg)

@@ -1,0 +1,211 @@
+{
+  "run_id": "p7-baselines-medium-val-42-2026-10-09T084929+0000",
+  "stage": "P7_baselines",
+  "profile": "medium",
+  "split": "val_strict",
+  "dev": false,
+  "seed": 42,
+  "limit": null,
+  "n_worlds": 4399,
+  "n_ambiguous_kept": 4,
+  "selection_freeze": null,
+  "fairness": {
+    "worlds": 4399,
+    "qid_digest": "cb515bf5512a1522e6f4c545ec267799e671b49b0d2034637dd879173efdea88",
+    "env_config": {
+      "max_optional_search": 2,
+      "bootstrap_tool": "bm25",
+      "bootstrap_passages": 1,
+      "passage_per_search_action": 1,
+      "preview_unseen_scores": true,
+      "max_steps": 16,
+      "strict_invalid_actions": true
+    },
+    "reward": {
+      "correct_answer": 2.0,
+      "wrong_answer": -2.0,
+      "correct_abstain": 0.8,
+      "unnecessary_abstain": -1.0,
+      "bm25_cost": 0.1,
+      "dense_cost": 0.25,
+      "bootstrap_bm25_cost": 0.1,
+      "candidate_f1_threshold": 0.8,
+      "force_provenance": true,
+      "gamma": 1.0
+    },
+    "reward_spec_hash": "e5ee2bfecb484c362043c0ea004d0ac8fc642410f9c62bede3a3a00398cb365a",
+    "retrieval_config_sha": "b4ca203442fd30b64c8b3255a9ccee060f38fcd8e9d5ffc37a0a2385ff6c3618",
+    "bootstrap": "bm25",
+    "reader": "P3 state cache, one per strict split"
+  },
+  "tau": 1.0,
+  "tau_source": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/models/correctness_estimator/threshold_selection.json",
+  "rows": [
+    {
+      "exp_id": "E00",
+      "policy": "B1_bootstrap_then_answer",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.7135939986360538,
+      "token_f1": 0.30249602229057276,
+      "coverage": 0.7322118663332575
+    },
+    {
+      "exp_id": "E01",
+      "policy": "B2_bm25_fixed",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -1.0395317117526715,
+      "token_f1": 0.306042180366997,
+      "coverage": 0.8279154353262105
+    },
+    {
+      "exp_id": "E02",
+      "policy": "B3_dense_fixed",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -1.3308024551034328,
+      "token_f1": 0.31617501607156806,
+      "coverage": 0.8401909524892021
+    },
+    {
+      "exp_id": "E03",
+      "policy": "B5_confidence_threshold",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.7262332348260969,
+      "token_f1": 0.18877469018971182,
+      "coverage": 0.3887247101614003
+    },
+    {
+      "exp_id": "E04",
+      "policy": "B6_laya_ce",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.6437372130029553,
+      "token_f1": 0.09358650551027581,
+      "coverage": 0.21232098204137304
+    },
+    {
+      "exp_id": "E05",
+      "policy": "B7_laya_rlcd",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.5713343941804956,
+      "token_f1": 0.0,
+      "coverage": 0.0
+    },
+    {
+      "exp_id": "E06",
+      "policy": "B8_rl",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.4890884291884519,
+      "token_f1": 0.15921948554735493,
+      "coverage": 0.314389634007729
+    },
+    {
+      "exp_id": "E07",
+      "policy": "B8_rl",
+      "seed": 42,
+      "status": "SKIPPED",
+      "reason": "the B8 checkpoint was trained with laya.regime='rlcd' while E07 needs 'ce'; one checkpoint is one arm, so this row is SKIPPED rather than fabricated",
+      "mean_episode_reward": null,
+      "token_f1": null,
+      "coverage": null
+    },
+    {
+      "exp_id": "B0",
+      "policy": "B0_random_valid",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.8251307115253467,
+      "token_f1": 0.15633195312131776,
+      "coverage": 0.4000909297567629
+    },
+    {
+      "exp_id": "B0",
+      "policy": "B0_random_valid",
+      "seed": 43,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.818401909524892,
+      "token_f1": 0.1575530113920674,
+      "coverage": 0.39940895658104114
+    },
+    {
+      "exp_id": "B0",
+      "policy": "B0_random_valid",
+      "seed": 44,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -0.8289156626506025,
+      "token_f1": 0.16055110387982605,
+      "coverage": 0.41213912252784723
+    },
+    {
+      "exp_id": "B4",
+      "policy": "B4_search_all",
+      "seed": 42,
+      "status": "SUCCEEDED",
+      "reason": "",
+      "mean_episode_reward": -1.172073198454194,
+      "token_f1": 0.31544163896152405,
+      "coverage": 0.8383723573539441
+    }
+  ],
+  "n_succeeded": 11,
+  "n_not_succeeded": 1,
+  "retrieval_recall": {
+    "n_answerable": 4399,
+    "k": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "bm25": [
+      0.8824732893839509,
+      0.9302114116844737,
+      0.9524892020913844,
+      0.9672652875653558,
+      0.9779495339849966
+    ],
+    "dense": [
+      0.9454421459422596,
+      0.9795408047283474,
+      0.9888611047965447,
+      0.9934075926346897,
+      0.996362809729484
+    ],
+    "union": [
+      0.975676290065924,
+      0.9909070243237099,
+      0.995453512161855,
+      0.9981814048647419,
+      0.999090702432371
+    ]
+  },
+  "limitations": [],
+  "results_csv": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/reports/tables/baseline_results_val.csv",
+  "predictions": {
+    "path": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/outputs/predictions/p7-baselines-medium-val-42-2026-10-09T084929+0000_val_strict.parquet",
+    "rows": 48389,
+    "sha256": "5721dd6ed444b393cc625f701a44144abd4402f896818ec84a85b15efd11fca8",
+    "bytes": 724430
+  },
+  "plots": {
+    "answer_f1_vs_retrieval_cost": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/reports/plots/answer_f1_vs_retrieval_cost.png",
+    "risk_coverage": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/reports/plots/risk_coverage.png",
+    "retrieval_recall": "/home/nkd/training-code/vietnamese-adaptive-qa-rl/reports/plots/retrieval_recall.png"
+  }
+}

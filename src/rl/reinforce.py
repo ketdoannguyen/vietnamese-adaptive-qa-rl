@@ -1,7 +1,9 @@
 """Sequential REINFORCE on episode return.
 
-    L = -1/N * sum_episodes sum_t (G_t - b(s_t)) log pi(a_t|s_t) - beta * H(pi)
-        + value_coef * (V(s_t) - G_t)^2
+    L = mean_over_collected_transitions[-(G_t - b(s_t)) log pi(a_t|s_t)
+        - beta * H(pi) + value_coef * (V(s_t) - G_t)^2]
+
+Longer episodes contribute more terms; this is a transition mean, not an episode mean.
 
 Transitions (retrieval rankings, reader outputs) come from immutable caches and are
 deterministic; **actions are always sampled from the current policy**, so the rollouts

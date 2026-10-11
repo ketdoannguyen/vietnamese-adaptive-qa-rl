@@ -117,6 +117,31 @@ def test_scaler_matches_declared_width_and_bounds():
 
 
 # ------------------------------------------------------------- training real
+def test_reinforce_loss_uses_transition_mean_not_episode_mean():
+    """One extra zero-advantage transition changes the loss denominator, not the objective."""
+    from src.rl.reinforce import Episode, Transition
+
+    class ConstantNet(torch.nn.Module):
+        def forward(self, features):
+            return torch.tensor([[0.0, 0.0, 0.0, 0.0]]), torch.tensor([0.0])
+
+    def transition(reward):
+        return Transition(features=np.zeros(1, dtype=np.float32),
+                          mask=np.ones(4, dtype=bool), action=ANSWER,
+                          log_prob=0.0, value=0.0, entropy=0.0, reward=reward)
+
+    config = RLConfig(gamma=1.0, entropy_coef=0, value_coef=0)
+    net = ConstantNet()
+    short = Episode(qid="short", transitions=[transition(1.0)])
+    empty_reward = Episode(qid="long", transitions=[transition(0.0), transition(0.0)])
+    only_short, stats_one = reinforce_loss([short], net, None, config,
+                                           device=torch.device("cpu"))
+    combined, stats_three = reinforce_loss([short, empty_reward], net, None, config,
+                                           device=torch.device("cpu"))
+    assert stats_one["n_steps"] == 1 and stats_three["n_steps"] == 3
+    assert combined.item() == pytest.approx(only_short.item() / 3)
+
+
 def test_one_update_changes_policy_parameters_and_yields_finite_gradients():
     """Spec 05 §11: |Δθ| > 0 and finite after a real update."""
     trainer = make_trainer([answerable_world(), abstain_world()])

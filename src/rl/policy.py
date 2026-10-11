@@ -88,6 +88,11 @@ class TorchScaler:
         self.std = torch.as_tensor(std, dtype=torch.float32)
         self.clip = clip
 
+    def to(self, device: str | torch.device) -> "TorchScaler":
+        self.mean = self.mean.to(device)
+        self.std = self.std.to(device)
+        return self
+
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         out = (x - self.mean) / self.std
         return torch.clamp(out, -self.clip, self.clip)

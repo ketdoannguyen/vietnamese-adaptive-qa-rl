@@ -1,4 +1,5 @@
 # Environment
+.claude/
 .venv/
 .venv-gliner/
 __pycache__/

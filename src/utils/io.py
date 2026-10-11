@@ -95,5 +95,14 @@ def write_parquet(path: str | Path, rows: Iterable[dict]) -> dict:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist([dict(row) for row in rows])
-    pq.write_table(table, str(path), compression="zstd")
-    return {"rows": table.num_rows, "sha256": sha256_file(path), "bytes": path.stat().st_size}
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".parquet.tmp")
+    os.close(fd)
+    try:
+        pq.write_table(table, tmp, compression="zstd")
+        result = {"rows": table.num_rows, "sha256": sha256_file(tmp),
+                  "bytes": os.path.getsize(tmp)}
+        os.replace(tmp, path)
+        return result
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)

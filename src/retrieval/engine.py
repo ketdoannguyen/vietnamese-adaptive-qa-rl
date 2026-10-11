@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
+import numpy as np
+
 from src.retrieval.bm25 import BM25Index
 from src.retrieval.dense import DenseBank, DenseEncoder, rank_by_inner_product
 from src.utils.hashing import sha256_json
@@ -73,6 +75,7 @@ def rank_scenario(*, scenario_id: str, qid: str, question: str,
                   docs: Mapping[str, str], corpus_doc_ids: Sequence[str],
                   dense_bank: DenseBank, dense_encoder: DenseEncoder,
                   top_n: int = 32, bm25_k1: float = 1.5, bm25_b: float = 0.75,
+                  query_vec: np.ndarray | None = None,
                   ) -> ScenarioRanking:
     """Rank one scenario's corpus with both tools.
 
@@ -93,7 +96,8 @@ def rank_scenario(*, scenario_id: str, qid: str, question: str,
     bm25_pairs = index.rank(question, top_n=top_n)
 
     bank = dense_bank.subset(corpus)
-    query_vec = dense_encoder.encode_queries([question])
+    if query_vec is None:
+        query_vec = dense_encoder.encode_queries([question])
     dense_pairs = rank_by_inner_product(query_vec, bank.vectors, bank.doc_ids)[:top_n]
 
     return ScenarioRanking(

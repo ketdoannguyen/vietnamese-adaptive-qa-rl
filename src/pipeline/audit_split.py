@@ -164,6 +164,10 @@ def run(
     if profile not in caps:
         raise ValueError(f"unknown profile {profile!r}; known profiles: {sorted(caps)}")
     cap = caps[profile]
+    train_cap = data.get("train_cap", cap)
+    if train_cap is not None and (isinstance(train_cap, bool) or not isinstance(train_cap, int)
+                                  or train_cap < 1):
+        raise ValueError("data.train_cap must be a positive integer or null")
     split_seed = int(data["split_seed"])
     scenario_seed = int(data["scenario_seed"])
     n_distractors = int(data["n_distractors"])
@@ -187,7 +191,8 @@ def run(
     run_id = f"p1-audit-split-{profile}-{now_iso().replace(':', '')}"
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
     registry.append(run_id=run_id, stage="P1_audit_split", status="RUNNING", profile=profile,
-                    cap_per_split=cap, split_seed=split_seed, scenario_seed=scenario_seed,
+                    cap_per_split=cap, train_cap=train_cap, split_seed=split_seed,
+                    scenario_seed=scenario_seed,
                     n_distractors=n_distractors, hard_negative_ratio=hard_negative_ratio)
     written: list[Path] = []
     try:
@@ -258,7 +263,8 @@ def run(
         docs_raw_selected: dict[str, dict[str, str]] = {}
         strict_stats: dict[str, auditor.SchemaStats] = {}
         for name in splitter.STRICT_SPLITS:
-            rows, cap_info = splitter.cap_rows(strict_rows[name], cap, salt=split_seed)
+            split_cap = train_cap if name == "train" else cap
+            rows, cap_info = splitter.cap_rows(strict_rows[name], split_cap, salt=split_seed)
             selected[name] = rows
             caps_info[name] = cap_info
             docs_selected[name] = {}
@@ -475,7 +481,8 @@ def run(
             f"to build them.",
             f"Rows in strict scopes are the *emitted* (profile-capped) rows; pool sizes are in "
             f"`data/processed/split_manifest.json` (profile `{profile}`, cap per split "
-            f"`{cap if cap is not None else 'none (full)'}`).",
+            f"`{cap if cap is not None else 'none (full)'}`, train cap "
+            f"`{train_cap if train_cap is not None else 'none (full)'}`).",
             f"Near-duplicate merge: {merge_sim['pairs']} document pairs at cosine >= "
             f"{MERGE_NEAR_DUP_THRESHOLD} plus "
             f"{sum(1 for names in groups_by_doc.values() if len(names) > 1)} documents referenced "
@@ -542,6 +549,7 @@ def run(
             context={
                 "profile": profile,
                 "cap per split": cap if cap is not None else "none (full)",
+                "train cap": train_cap if train_cap is not None else "none (full)",
                 "repo_id": source["repo_id"],
                 "resolved revision": source["resolved_revision"],
                 "split seed": split_seed,
@@ -562,6 +570,7 @@ def run(
             "stage": "P1_data",
             "profile": profile,
             "cap_per_split": cap,
+            "train_cap": train_cap,
             "caps_definition": dict(caps),
             "split_manifest": _rel(manifest_path),
             "created_utc": now_iso(),
@@ -638,7 +647,7 @@ def run(
         raise
 
     registry.record_artifact(run_id, "P1_audit_split", written, profile=profile, cap_per_split=cap,
-                             invariants_pass=result["leakage"]["pass"],
+                             train_cap=train_cap, invariants_pass=result["leakage"]["pass"],
                              rows={name: info["rows_emitted"]
                                    for name, info in result["strict_split"]["splits"].items()})
     return result

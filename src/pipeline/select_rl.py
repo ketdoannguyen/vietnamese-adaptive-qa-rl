@@ -16,9 +16,9 @@ writes the freeze LAST — a failure at any point leaves no new freeze.
 
 The rule is fixed in code before any selection run (D016): primary = highest ``val_reward``;
 tie-break = lowest seed. Eligibility requires the candidate to belong to the *current* chain:
-its registry row is ``SUCCEEDED`` for this profile, its ``laya.regime`` equals
-``laya.frozen``, and its retrieval / reader / reward / eval-episode fingerprints match what
-this config would produce — an archive from a superseded chain must never be selectable.
+its registry row is ``SUCCEEDED`` for this profile, its ``laya.regime`` and model hash
+match the frozen checkpoint, and its retrieval / reader / reward / eval-episode fingerprints
+match what this config would produce — a superseded archive must never be selectable.
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ TIE_BREAK = "lowest_seed"
 PLANNED_SEEDS = (42, 43, 44)
 RULE = ("highest val_reward (mean episodic reward on val_strict, greedy) among eligible "
         "P6_rl archives; tie-break lowest seed; eligible = one SUCCEEDED P6_rl registry row "
-        "for this profile with laya.regime == laya.frozen and retrieval/reader/reward/eval "
-        "fingerprints matching the current chain")
+        "for this profile with the frozen Laya checkpoint hash and matching "
+        "retrieval/reader/reward/eval fingerprints")
 
 #: The four artifacts that identify a B8 checkpoint (``policies.RL_REQUIRED_FILES`` + rl_config).
 CORE_FILES = ("policy.safetensors", "scaler.json", "rl_config.json", train_rl.CONFIG_FILE)
@@ -105,6 +105,7 @@ def scan_candidates(cfg: Mapping[str, Any], profile: str, rows: Sequence[Mapping
     """
     root = resolve(cfg, "models") / train_rl.RL_RUNS_DIR
     frozen = (cfg.get("laya") or {}).get("frozen")
+    current_prior: dict[str, Any] | None = None
     retrieval_sha = build_retrieval.retrieval_config_sha(dict(cfg))
     rl_config = RLConfig.from_dict(dict(cfg))
     reward_hash = RewardConfig.from_dict(dict(cfg)).spec_hash()
@@ -128,6 +129,15 @@ def scan_candidates(cfg: Mapping[str, Any], profile: str, rows: Sequence[Mapping
         if entry["regime"] != frozen:
             excluded.append({**entry, "reason": f"laya.regime {entry['regime']!r} "
                                                 f"!= frozen {frozen!r}"})
+            continue
+        if current_prior is None:
+            try:
+                current_prior = train_rl.laya_reference(cfg, frozen)
+            except FileNotFoundError as exc:
+                raise SelectionRefused(f"frozen Laya checkpoint is missing: {exc}") from exc
+        if (config.get("laya") or {}).get("model_hash") != current_prior["model_hash"]:
+            excluded.append({**entry, "reason": "laya.model_hash differs from the current "
+                                                 "frozen checkpoint"})
             continue
         if config.get("retrieval_config_sha") != retrieval_sha:
             excluded.append({**entry,
@@ -173,7 +183,7 @@ def scan_candidates(cfg: Mapping[str, Any], profile: str, rows: Sequence[Mapping
             "archive_dir": str(archive), "val_reward": config["val_reward"],
             "val_std_reward": config.get("val_std_reward"),
             "best_update": config.get("best_update"), "updates_ran": config.get("updates_ran"),
-            "eval_episodes": episodes,
+            "eval_episodes": episodes, "validation": config.get("validation"),
             "laya_model_hash": (config.get("laya") or {}).get("model_hash"),
             "retrieval_config_sha": config.get("retrieval_config_sha"),
             **{f"{_FILE_STEM[name]}_sha256": sha256_file(archive / name)
@@ -227,10 +237,15 @@ def build_freeze(cfg: Mapping[str, Any], *, profile: str, now: str, run_id: str,
         "stage": STAGE, "run_id": run_id, "profile": profile, "created_utc": now,
         "primary_metric": PRIMARY_METRIC,
         "primary_metric_desc": ("mean episodic reward on val_strict, greedy, "
+                                f"episodes={winner['validation']['n_tune']} fixed QIDs"
+                                if winner.get("validation") else
+                                "mean episodic reward on val_strict, greedy, "
                                 f"eval_episodes={winner['eval_episodes']}"),
         "tie_break": TIE_BREAK, "rule": RULE,
         "frozen_prior_regime": (cfg.get("laya") or {}).get("frozen"),
-        "eval_episodes": winner["eval_episodes"],
+        "eval_episodes": (winner["validation"]["n_tune"] if winner.get("validation")
+                          else winner["eval_episodes"]),
+        "validation": winner.get("validation"),
         "planned_seeds": list(PLANNED_SEEDS),
         "seeds_present": present,
         "seeds_missing": [seed for seed in PLANNED_SEEDS if seed not in present],
@@ -287,6 +302,11 @@ def run(*, cfg: Mapping[str, Any], profile: str, now: str | None = None, force: 
         raise SelectionRefused(
             f"no eligible P6_rl archives under {resolve(cfg, 'models') / train_rl.RL_RUNS_DIR}; "
             f"excluded={excluded}")
+    protocols = {json.dumps(candidate.get("validation"), sort_keys=True)
+                 for candidate in candidates}
+    if len(protocols) != 1:
+        raise SelectionRefused("validation protocol differs across P6_rl archives; "
+                               "cannot compare val rewards from different question sets")
 
     winner = min(candidates, key=lambda c: (-float(c["val_reward"]), int(c["seed"])))
     missing = [seed for seed in PLANNED_SEEDS

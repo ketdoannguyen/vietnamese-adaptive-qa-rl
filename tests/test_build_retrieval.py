@@ -116,6 +116,67 @@ def test_pipeline_writes_rankings_reachability_and_report(cfg):
     assert report["unreachable_rate"] == 0.0
 
 
+def test_missing_queries_are_batched_without_changing_rankings(cfg, monkeypatch):
+    calls = []
+    original = _StubEncoder.encode_queries
+
+    def count_queries(self, texts):
+        calls.append(list(texts))
+        return original(self, texts)
+
+    monkeypatch.setattr(_StubEncoder, "encode_queries", count_queries)
+    summary = _run(cfg)
+    assert summary["splits"][SPLIT]["ranked"] == len(SCENARIOS)
+    assert calls == [[QUESTIONS[s["qid"]] for s in SCENARIOS]]
+
+    actual = {r["scenario_id"]: r for r in read_jsonl(br.rankings_path(cfg, SPLIT))}
+    docs = br.load_docs(cfg, (SPLIT,))
+    bank, _ = br.DenseBank.load(str(br.bank_path(cfg)))
+    baseline = {
+        s["scenario_id"]: br.rank_scenario(
+            scenario_id=s["scenario_id"], qid=s["qid"], question=QUESTIONS[s["qid"]],
+            docs=docs, corpus_doc_ids=s["corpus_doc_ids"], dense_bank=bank,
+            dense_encoder=_StubEncoder(), top_n=cfg["retrieval"]["bm25"]["top_n_cached"],
+            bm25_k1=cfg["retrieval"]["bm25"]["k1"],
+            bm25_b=cfg["retrieval"]["bm25"]["b"],
+        ).to_row() for s in SCENARIOS
+    }
+    for key, row in baseline.items():
+        assert actual[key]["rankings"] == row["rankings"]
+        for tool in ("bm25", "dense"):
+            for doc_id, score in row["scores"][tool].items():
+                assert actual[key]["scores"][tool][doc_id] == pytest.approx(score, abs=1e-6)
+
+
+def test_bad_batched_query_shape_refuses_before_writing_rankings(cfg, monkeypatch):
+    def bad_queries(self, texts):
+        return self.encode_passages(["one"])  # the returned row count cannot match todo
+
+    monkeypatch.setattr(_StubEncoder, "encode_queries", bad_queries)
+    with pytest.raises(ValueError, match="dense query embeddings"):
+        _run(cfg)
+    assert not br.rankings_path(cfg, SPLIT).exists()
+
+
+def test_cached_rows_encode_only_missing_questions(cfg, monkeypatch):
+    _run(cfg)
+    path = br.rankings_path(cfg, SPLIT)
+    rows = list(read_jsonl(path))
+    missing = rows.pop()
+    write_jsonl(path, rows)
+    calls = []
+    original = _StubEncoder.encode_queries
+
+    def count_queries(self, texts):
+        calls.append(list(texts))
+        return original(self, texts)
+
+    monkeypatch.setattr(_StubEncoder, "encode_queries", count_queries)
+    result = _run(cfg)
+    assert result["splits"][SPLIT] == {"cache_hits": 2, "ranked": 1, "scenarios": 3}
+    assert calls == [[QUESTIONS[missing["qid"]]]]
+
+
 def test_second_run_is_a_cache_hit_and_cache_only_reads_it(cfg):
     _run(cfg)
     second = _run(cfg)
@@ -133,10 +194,80 @@ def test_cache_only_without_cache_fails_loudly(cfg):
         _run(cfg, cache_only=True)
 
 
+def test_dense_revision_change_invalidates_rankings_and_bank(cfg):
+    first = _run(cfg)
+    cfg["retrieval"]["dense"]["revision"] = "new-revision"
+    assert br.retrieval_config_sha(cfg) != first["config_sha"]
+    second = _run(cfg)
+    assert second["splits"][SPLIT]["ranked"] == 3
+    assert second["dense_bank"]["rebuilt"] is True
+    assert second["dense_bank"]["revision"] == "new-revision"
+
+
 def test_changing_the_retrieval_config_invalidates_cached_rows(cfg):
     _run(cfg)
     cfg["retrieval"]["bm25"]["k1"] = 1.2
     assert _run(cfg)["splits"][SPLIT]["ranked"] == 3
+
+
+def test_query_encoder_uses_revision_of_bank(cfg, monkeypatch):
+    seen_revisions = []
+    initial = br.DenseEncoder
+
+    class TrackingEncoder(initial):
+        def __init__(self, **kwargs):
+            seen_revisions.append(kwargs.get("revision"))
+            super().__init__(**kwargs)
+
+    cfg["retrieval"]["dense"]["revision"] = "pinned-revision"
+    monkeypatch.setattr(br, "DenseEncoder", TrackingEncoder)
+    _run(cfg)
+    assert seen_revisions == ["pinned-revision", "pinned-revision"]
+
+
+def test_changed_document_text_invalidates_bank_and_cached_rankings(cfg):
+    _run(cfg)
+    processed = Path(cfg["paths"]["data_processed"])
+    changed = dict(DOCS)
+    changed["doc_hanoi"] += " Câu bổ sung."
+    write_parquet(processed / f"docs_{SPLIT}.parquet",
+                  [{"doc_id": k, "text": v} for k, v in changed.items()])
+    result = _run(cfg)
+    assert result["dense_bank"]["rebuilt"] is True
+    assert result["splits"][SPLIT] == {"cache_hits": 1, "ranked": 2, "scenarios": 3}
+
+
+def test_changed_question_text_invalidates_only_its_ranking(cfg):
+    _run(cfg)
+    updated = dict(QUESTIONS)
+    updated["q:capital"] += " Mới?"
+    write_parquet(Path(cfg["paths"]["data_processed"]) / f"questions_{SPLIT}.parquet",
+                  [{"qid": qid, "question": text} for qid, text in updated.items()])
+    result = _run(cfg)
+    assert result["dense_bank"]["rebuilt"] is False
+    assert result["splits"][SPLIT] == {"cache_hits": 2, "ranked": 1, "scenarios": 3}
+    cache = {row["qid"]: row for row in read_jsonl(br.rankings_path(cfg, SPLIT))}
+    assert cache["q:capital"]["question_sha"]
+
+
+def test_cache_only_refuses_rankings_after_question_text_change(cfg):
+    _run(cfg)
+    updated = dict(QUESTIONS)
+    updated["q:capital"] += " Mới?"
+    write_parquet(Path(cfg["paths"]["data_processed"]) / f"questions_{SPLIT}.parquet",
+                  [{"qid": qid, "question": text} for qid, text in updated.items()])
+    with pytest.raises(FileNotFoundError, match="cache-only"):
+        _run(cfg, cache_only=True)
+
+
+def test_cache_only_refuses_rankings_after_document_text_change(cfg):
+    _run(cfg)
+    changed = dict(DOCS)
+    changed["doc_hanoi"] += " New passage text."
+    write_parquet(Path(cfg["paths"]["data_processed"]) / f"docs_{SPLIT}.parquet",
+                  [{"doc_id": k, "text": v} for k, v in changed.items()])
+    with pytest.raises(FileNotFoundError, match="cache-only"):
+        _run(cfg, cache_only=True)
 
 
 def test_a_cached_row_for_a_changed_corpus_is_rebuilt(cfg):

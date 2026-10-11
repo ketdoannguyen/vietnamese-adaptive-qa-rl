@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Guard experiment pipeline launches with a shared lock and GPU/CPU ledger.
 
-GPU launches require a measured forecast and a watchdog. The audited CPU-only teacher
-stage uses --cpu-stage, shares the namespace lock, and records unbilled CPU time. Bare
+GPU launches require a measured forecast and a watchdog. Audited CPU-only stages
+use --cpu-stage, share the namespace lock, and record unbilled CPU time. Bare
 ``python -m`` bypasses these cooperative guards. An open GPU interval bills through
 recovery time; recovery refuses intervals owned by run_all or a live stage.
 """
@@ -36,7 +36,7 @@ GPU_MODULES = {"src.pipeline.build_retrieval", "src.pipeline.train_reader",
                "src.pipeline.cache_laya", "src.pipeline.train_rl",
                "src.pipeline.train_correctness", "src.pipeline.eval_baselines",
                "src.pipeline.train_gliner", "src.pipeline.cache_decision"}
-CPU_MODULES = {"src.pipeline.make_teacher"}
+CPU_MODULES = {"src.pipeline.audit_split", "src.pipeline.make_teacher"}
 
 
 def _module_running(module: str) -> bool:
@@ -148,9 +148,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"interpreter not found: {python}")
     stage_args = args.stage_args[1:] if args.stage_args[:1] == ["--"] else args.stage_args
     forbidden = ("--config", "--profile", "--data", "--base", "--out",
-                 "--force", "--dev", "--reselect")
+                 "--force", "--dev", "--reselect", "--limit")
     if args.cpu_stage and stage_args:
-        parser.error("CPU teacher stage accepts no extra arguments until split protocol is frozen")
+        parser.error("CPU stages accept no extra arguments until split protocol is frozen")
     if any(arg.startswith("--") and any(name.startswith(arg.split("=", 1)[0])
            for name in forbidden) for arg in stage_args):
         parser.error("stage arguments must not override paths, profile, or artifact safety")

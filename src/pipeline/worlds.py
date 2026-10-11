@@ -143,8 +143,8 @@ def ambiguous_negatives_path(cfg: Mapping[str, Any]) -> Path:
 def load_ambiguous_qids(cfg: Mapping[str, Any], split: str) -> frozenset[str]:
     """Qids of ambiguous negatives for ``split`` — excluded from train *reward* only.
 
-    Primary source is P1's ``ambiguous_negatives.json`` export (tolerant of a list of qids,
-    a list of audit rows, or a ``{"qids": [...]}`` wrapper). Until that file exists the
+    Primary source is P1's ``ambiguous_negatives.json`` split export (also tolerant of
+    a list of qids, audit rows, or a ``{"qids": [...]}`` wrapper). Until that file exists the
     label store's ``ambiguous_negative`` column is used, which is what the auditor writes
     today; with neither, nothing is flagged and the set is empty.
     """
@@ -158,13 +158,22 @@ def load_ambiguous_qids(cfg: Mapping[str, Any], split: str) -> frozenset[str]:
 def _parse_ambiguous(data: Any, split: str) -> list[str]:
     """Read the audit export defensively; a row's own verdict is never overridden."""
     if isinstance(data, dict):
-        for key in ("qids", "ambiguous_qids", "ambiguous"):
-            if isinstance(data.get(key), list):
-                data = data[key]
-                break
-        else:
-            data = [{"qid": qid, **(row if isinstance(row, dict) else {})}
-                    for qid, row in data.items()]
+        if "splits" in data:
+            splits = data["splits"]
+            if not isinstance(splits, dict) or split not in splits:
+                raise ValueError(f"{AMBIGUOUS_FILE}: missing split {split!r}")
+            row = splits[split]
+            if not isinstance(row, dict) or not isinstance(row.get("flagged_qids"), list):
+                raise ValueError(f"{AMBIGUOUS_FILE}: {split!r}.flagged_qids must be a list")
+            data = row["flagged_qids"]
+        if isinstance(data, dict):
+            for key in ("qids", "ambiguous_qids", "ambiguous"):
+                if isinstance(data.get(key), list):
+                    data = data[key]
+                    break
+            else:
+                data = [{"qid": qid, **(row if isinstance(row, dict) else {})}
+                        for qid, row in data.items()]
     if not isinstance(data, list):
         raise ValueError(f"{AMBIGUOUS_FILE}: expected a list or a mapping, got {type(data).__name__}")
     qids: list[str] = []
@@ -267,14 +276,15 @@ def _replay(env: AdaptiveQAEnv, qid: str, history: tuple[int, ...]
 
 
 def prewarm_prior(cfg: Mapping[str, Any], regime: str, checkpoint: str | Path,
-                  requests: Sequence[tuple[str, str, str]]) -> Callable[[dict], np.ndarray]:
+                  requests: Sequence[tuple[str, str, str]], *,
+                  cache_dir: str | Path | None = None) -> Callable[[dict], np.ndarray]:
     """Warm ``regime``'s Laya probability cache for ``requests`` and return the rollout lookup.
 
     The adapter is always loaded, even when every row is already cached: binding it is what
     invalidates stored rows when the checkpoint changed, and serving a stale probability would
     be a silent scientific error (see :mod:`src.decision.laya_cache`).
     """
-    cache = LayaProbCache(laya_cache_dir(cfg, regime))
+    cache = LayaProbCache(cache_dir if cache_dir is not None else laya_cache_dir(cfg, regime))
     adapter = LayaAdapter.load(checkpoint)
     try:
         probs: dict[tuple[str, str], np.ndarray] = {}

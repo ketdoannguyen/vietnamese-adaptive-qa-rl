@@ -161,12 +161,14 @@ def reinforce_loss(episodes: list[Episode], net: PolicyNet, scaler_t: Any | None
 
 def evaluate(env: AdaptiveQAEnv, net: PolicyNet, extractor: FeatureExtractor,
              scaler_t: Any | None, laya_fn, *, episodes: int, device: torch.device,
-             seed_base: int = 10_000) -> dict[str, Any]:
-    """Deterministic (greedy) evaluation. Never used for parameter updates."""
+             seed_base: int = 10_000, qids: Sequence[str] | None = None) -> dict[str, Any]:
+    """Deterministic greedy evaluation, optionally over fixed, unique question IDs."""
+    if qids is not None and (len(qids) != episodes or len(set(qids)) != len(qids)):
+        raise ValueError("fixed evaluation qids must match episodes and contain no duplicates")
     rewards, lengths, actions = [], [], np.zeros(N_ACTIONS, dtype=int)
     for i in range(episodes):
         ep = rollout(env, net, extractor, scaler_t, laya_fn, seed=seed_base + i,
-                     greedy=True, device=device)
+                     qid=qids[i] if qids is not None else None, greedy=True, device=device)
         rewards.append(ep.total_reward)
         lengths.append(len(ep.transitions))
         for t in ep.transitions:
@@ -183,13 +185,14 @@ def evaluate(env: AdaptiveQAEnv, net: PolicyNet, extractor: FeatureExtractor,
 class ReinforceTrainer:
     def __init__(self, train_env: AdaptiveQAEnv, val_env: AdaptiveQAEnv, config: RLConfig,
                  *, laya_fn=None, device: str = "cpu", run_dir: str | Path | None = None,
-                 seed: int | None = None) -> None:
+                 seed: int | None = None, val_qids: Sequence[str] | None = None) -> None:
         self.train_env = train_env
         self.val_env = val_env
         self.config = config
         self.laya_fn = laya_fn
         self.device = torch.device(device)
         self.seed = config.seed if seed is None else seed
+        self.val_qids = tuple(val_qids) if val_qids is not None else None
         self.run_dir = Path(run_dir) if run_dir else None
         self.extractor = FeatureExtractor()
         self.net: PolicyNet | None = None
@@ -270,9 +273,11 @@ class ReinforceTrainer:
             }
 
             if update % self.config.eval_every == 0:
+                kwargs = {"episodes": self.config.eval_episodes, "device": self.device}
+                if self.val_qids is not None:
+                    kwargs.update(episodes=len(self.val_qids), qids=self.val_qids)
                 val = evaluate(self.val_env, self.net, self.extractor, self.scaler_t,
-                               self.laya_fn, episodes=self.config.eval_episodes,
-                               device=self.device)
+                               self.laya_fn, **kwargs)
                 row["val"] = val
                 if val["mean_reward"] > best_val + 1e-6:
                     best_val = val["mean_reward"]

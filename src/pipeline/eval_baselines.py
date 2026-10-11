@@ -53,12 +53,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from src.decision.laya_adapter import checkpoint_model_hash
 from src.eval import reporting, splitting
 from src.eval.correctness import CorrectnessEstimator
 from src.eval.policies import (
     DEFAULT_TAU, RANDOM_POLICY_SEEDS, BootstrapThenAnswerPolicy, ConfidenceThresholdPolicy,
     FixedToolPolicy, LayaArgmaxPolicy, RandomValidPolicy, SearchAllPolicy, load_rl_policy,
-    resolve_policy_id, rl_checkpoint_status, short_code,
+    resolve_policy_id, rl_checkpoint_dir, rl_checkpoint_status, short_code,
 )
 from src.eval.rollout import EpisodeRecord, episode_row, run_policy
 from src.pipeline import build_retrieval, worlds
@@ -193,8 +194,11 @@ def regime_prior_fn(cfg: Mapping[str, Any], regime: str, world_list: Sequence[An
     checkpoint = worlds.laya_checkpoint_dir(cfg, regime)
     if not checkpoint.is_dir():
         raise FileNotFoundError(f"Laya checkpoint for regime {regime!r} is missing: {checkpoint}")
+    # Evaluation must not extend the P5 training cache (especially with test states).
+    scratch = resolve(cfg, "data_cache") / "eval_priors" / regime
     return worlds.prewarm_prior(cfg, regime, checkpoint,
-                                worlds.reachable_state_requests(world_list, reward, config))
+                                worlds.reachable_state_requests(world_list, reward, config),
+                                cache_dir=scratch)
 
 
 def build_policy(spec: RowSpec, *, cfg: Mapping[str, Any], tau: float,
@@ -219,6 +223,11 @@ def build_policy(spec: RowSpec, *, cfg: Mapping[str, Any], tau: float,
         return LayaArgmaxPolicy(prior_fn("rlcd"), regime="rlcd")
     if code == "B8":
         assert spec.prior is not None
+        rl_config = read_json(rl_checkpoint_dir(cfg) / "config.json")
+        recorded_hash = (rl_config.get("laya") or {}).get("model_hash")
+        current_hash = checkpoint_model_hash(worlds.laya_checkpoint_dir(cfg, spec.prior))
+        if recorded_hash != current_hash:
+            raise ValueError("RL checkpoint laya.model_hash differs from current frozen prior")
         return load_rl_policy(cfg, laya_fn=prior_fn(spec.prior), prior_regime=spec.prior)
     raise ValueError(f"no builder for policy {spec.policy!r}")
 

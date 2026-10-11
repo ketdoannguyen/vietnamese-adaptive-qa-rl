@@ -98,6 +98,33 @@ def pilot_config_sha() -> str:
     return sha256_text(json.dumps(cfg, ensure_ascii=False, sort_keys=True, indent=2))
 
 
+def test_small_profile_has_distinct_identity_and_1000_row_cap() -> None:
+    small = load_config("small")
+    assert small["data"]["profile"] == "small"
+    assert small["data"]["caps"]["small"] == 1000
+    assert config_sha_for("small", {}) != config_sha_for("full", {})
+
+
+def test_pilot_overlays_keep_full_validation_and_separate_outputs() -> None:
+    configs = []
+    for size in (1000, 5000):
+        overlay = read_yaml(REAL / "configs" / f"gliner_laya_{size}.yaml")
+        cfg = load_config("medium", extra=overlay)
+        assert cfg["data"]["profile"] == "medium"
+        assert cfg["data"]["train_cap"] == size
+        assert cfg["data"]["caps"]["medium"] == 5000
+        assert cfg["retrieval"]["dense"]["revision"] == \
+            "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+        assert cfg["reader"]["revision"] == "e73636d4f797dec63c3081bb6ed5c7b0bb3f2089"
+        assert cfg["limits"]["max_gpu_hours"] == 48
+        roots = {Path(value).parts[:3] for value in cfg["paths"].values()}
+        assert roots == {("outputs", "experiments", f"gliner-laya-{size}")}
+        configs.append(cfg)
+    assert configs[0]["paths"]["data_processed"] != configs[1]["paths"]["data_processed"]
+    assert config_sha_for("medium", read_yaml(REAL / "configs" / "gliner_laya_1000.yaml")) != \
+        config_sha_for("medium", read_yaml(REAL / "configs" / "gliner_laya_5000.yaml"))
+
+
 def registry(root: Path) -> list[dict]:
     path = root / "outputs" / "runs" / "index.jsonl"
     if not path.is_file():
@@ -1066,6 +1093,43 @@ def main():
 if __name__ == "__main__":
     main()
 """
+
+
+@pytest.mark.parametrize("cap", [None, 0, 49, float("nan")])
+def test_run_all_refuses_invalid_or_unauthorized_gpu_cap_before_any_write(tmp_path, cap):
+    root = make_repo(tmp_path)
+    (root / "src/pipeline/download.py").write_text(STUB_STAGE, encoding="utf-8")
+    overlay = tmp_path / "invalid_budget.yaml"
+    write_yaml(overlay, {"limits": {"max_gpu_hours": cap}})
+
+    result = run_script(root, "run_all.sh", "--profile", "pilot", "--config", str(overlay),
+                        "--stop-after", "download")
+
+    assert result.returncode != 0
+    assert "max_gpu_hours" in (result.stdout + result.stderr)
+    assert not (root / "data/raw/raw.parquet").exists()
+    assert registry(root) == []
+
+
+def test_resume_recovers_cpu_interval_with_invalid_budget_but_launches_nothing(tmp_path):
+    root = make_repo(tmp_path)
+    write_registry(root, [{"run_id": "crashed-run", "stage": "run_all", "status": "RUNNING",
+                           "profile": "pilot", "event": "start",
+                           "ts": "2026-10-07T00:00:00+00:00"}])
+    append_open_interval(root, run_id="crashed-run", stage_key="download",
+                         age_seconds=1, gpu=False)
+    overlay = tmp_path / "invalid_resume_budget.yaml"
+    write_yaml(overlay, {"limits": {"max_gpu_hours": None}})
+
+    result = run_script(root, "run_all.sh", "--profile", "pilot", "--config", str(overlay),
+                        "--resume", "--stop-after", "download")
+
+    assert result.returncode == 3
+    recovered = [i for i in ledger_intervals(root)
+                 if i["open"]["interval_id"] == "open-download-crashed-run"][0]
+    assert recovered["close"]["status"] == "INTERRUPTED"
+    assert not (root / "data/raw/raw.parquet").exists()
+    assert "không chạy stage mới" in result.stderr
 
 
 def test_oom_retry_is_refused_once_the_failed_attempt_exhausted_the_budget(tmp_path):

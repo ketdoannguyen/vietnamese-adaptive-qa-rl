@@ -23,7 +23,7 @@ from src.rl.reinforce import (
     reinforce_loss,
     rollout,
 )
-from tests.toy_world import DOC_B, DOC_C, default_calculator, make_reader, span_prediction
+from tests.toy_world import DOC_B, DOC_C, default_calculator, make_reader, positive_world, span_prediction
 
 ANSWER_ONLY = "1976"
 
@@ -156,6 +156,28 @@ def test_policy_learns_to_answer_when_answering_is_always_correct():
     assert after > 0.6, f"policy should strongly prefer ANSWER, got {after:.3f}"
 
 
+def test_policy_learns_to_search_when_only_the_next_passage_has_the_answer():
+    world = positive_world()
+    config = RLConfig(max_updates=80, batch_episodes=8, eval_every=20,
+                      eval_episodes=32, hidden_dim=32, lr=5e-3)
+    train_env = AdaptiveQAEnv([world], default_calculator(),
+                              EnvConfig(max_optional_search=1))
+    val_env = AdaptiveQAEnv([world], default_calculator(),
+                            EnvConfig(max_optional_search=1))
+    trainer = ReinforceTrainer(train_env, val_env, config, seed=0)
+    net = trainer.build(d_in=trainer.extractor.dim)
+    trainer.fit_scaler(episodes=8)
+    before = _prob_of(trainer, net, world.qid, SEARCH_BM25)
+    trainer.train()
+    after = _prob_of(trainer, net, world.qid, SEARCH_BM25)
+    episode = rollout(val_env, net, trainer.extractor, trainer.scaler_t, None,
+                      qid=world.qid, greedy=True)
+    assert after > before
+    assert after > 0.6
+    assert [t.action for t in episode.transitions] == [SEARCH_BM25, ANSWER]
+    assert episode.total_reward == pytest.approx(2.0 - 0.1 - 0.1)
+
+
 def test_policy_learns_to_abstain_on_unanswerable_questions():
     trainer = make_trainer([abstain_world()],
                            config=RLConfig(max_updates=60, batch_episodes=8, eval_every=20,
@@ -195,6 +217,23 @@ def test_rollout_obeys_mask_and_horizon_and_returns_are_finite():
             assert t.mask[t.action], "sampled action must be legal under its own mask"
             assert t.mask[ABSTAIN], "ABSTAIN is always legal"
         assert np.isfinite(ep.total_reward)
+
+
+def test_evaluate_fixed_qids_visits_each_world_once():
+    trainer = make_trainer([answerable_world(), abstain_world()])
+    trainer.fit_scaler(episodes=4)
+    net = trainer.build()
+    qids = ["q:answer", "q:abstain"]
+    result = evaluate(trainer.val_env, net, trainer.extractor, trainer.scaler_t, None,
+                      episodes=len(qids), qids=qids, device=torch.device("cpu"))
+    expected = [rollout(trainer.val_env, net, trainer.extractor, trainer.scaler_t, None,
+                        qid=qid, seed=10_000 + i, greedy=True).total_reward
+                for i, qid in enumerate(qids)]
+    assert result["episodes"] == 2
+    assert result["mean_reward"] == pytest.approx(np.mean(expected))
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate(trainer.val_env, net, trainer.extractor, trainer.scaler_t, None,
+                 episodes=2, qids=[qids[0], qids[0]], device=torch.device("cpu"))
 
 
 def test_deterministic_evaluation_repeats_the_same_actions():

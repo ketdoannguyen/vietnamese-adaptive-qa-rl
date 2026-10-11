@@ -27,13 +27,15 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+import numpy as np
+
 from src.data import artifacts, scenarios as scenario_mod
 from src.data.schemas import ScenarioRecord
 from src.retrieval.dense import DenseBank, DenseEncoder
 from src.retrieval.engine import ScenarioRanking, rank_scenario, scenario_corpus_sha
 from src.retrieval.rankings import differing_examples, summarise_retrieval
 from src.utils.config import add_profile_args, config_from_args, resolve, snapshot_config
-from src.utils.hashing import sha256_json
+from src.utils.hashing import sha256_json, sha256_text
 from src.utils.io import atomic_write_json, read_jsonl, write_jsonl
 from src.utils.reproducibility import capture_library_versions
 from src.utils.runs import RunRegistry, now_iso
@@ -70,6 +72,7 @@ def retrieval_config_sha(cfg: dict) -> str:
         "bm25": {k: ret["bm25"][k] for k in ("tokenize", "k1", "b", "top_n_cached")},
         "dense": {k: ret["dense"][k] for k in
                   ("model", "max_length", "normalize", "query_prefix", "passage_prefix")},
+        "dense_revision": ret["dense"].get("revision"),
         "passage_per_search_action": ret["passage_per_search_action"],
     })
 
@@ -126,6 +129,7 @@ def build_bank(cfg: dict, docs: Mapping[str, str], needed: Iterable[str]) -> tup
         encoder.unload()  # never leave the encoder resident next to the reader/Laya
     meta = {"model": ret["model"], "revision": revision, "revision_source": source,
             "dim": int(bank.vectors.shape[1]), "docs": len(bank.doc_ids), "rebuilt": True,
+            "docs_sha": sha256_json({d: docs[d] for d in ordered}),
             "config_sha": retrieval_config_sha(cfg)}
     bank.save(str(bank_path(cfg)), meta=meta)
     return bank, meta
@@ -152,7 +156,9 @@ def ensure_bank(cfg: dict, docs: Mapping[str, str], needed: Iterable[str],
     path = bank_path(cfg)
     if path.exists() and not force:
         bank, meta = DenseBank.load(str(path))
-        if meta.get("config_sha") == retrieval_config_sha(cfg) and needed <= set(bank.doc_ids):
+        if (meta.get("config_sha") == retrieval_config_sha(cfg)
+                and needed <= set(bank.doc_ids)
+                and meta.get("docs_sha") == sha256_json({d: docs[d] for d in bank.doc_ids})):
             return bank, {**meta, "rebuilt": False}
     return build_bank(cfg, docs, needed)
 
@@ -224,7 +230,8 @@ def _reachability_row(scenario: ScenarioRecord, ranking: ScenarioRanking,
 
 def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Mapping[str, str],
                 scenarios: Sequence[ScenarioRecord], bank: DenseBank | None, config_sha: str,
-                force: bool, cache_only: bool) -> tuple[list[ScenarioRanking], list[dict], dict]:
+                force: bool, cache_only: bool,
+                dense_revision: str | None = None) -> tuple[list[ScenarioRanking], list[dict], dict]:
     ret = cfg["retrieval"]
     top_n = int(ret["bm25"]["top_n_cached"])
     path = rankings_path(cfg, split)
@@ -233,8 +240,12 @@ def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Ma
     # gets different distractors at different profile caps, so an id match alone can serve
     # a ranking of a different corpus. Older rows without the fingerprint are rebuilt.
     todo = [s for s in scenarios
-            if rows.get(s.scenario_id, {}).get("corpus_sha")
-            != scenario_corpus_sha(list(s.corpus_doc_ids))]
+            if (rows.get(s.scenario_id, {}).get("corpus_sha")
+                != scenario_corpus_sha(list(s.corpus_doc_ids))
+                or rows.get(s.scenario_id, {}).get("docs_sha")
+                != sha256_json({d: docs[d] for d in s.corpus_doc_ids})
+                or rows.get(s.scenario_id, {}).get("question_sha")
+                != sha256_text(questions[s.qid]))]
     if todo and cache_only:
         raise FileNotFoundError(
             f"--cache-only but {len(todo)} of {len(scenarios)} {split} scenarios have no cached "
@@ -242,7 +253,7 @@ def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Ma
     if todo:
         if bank is None:
             raise ValueError("dense bank required to build rankings; run without --cache-only")
-        encoder = DenseEncoder(model_name=ret["dense"]["model"],
+        encoder = DenseEncoder(model_name=ret["dense"]["model"], revision=dense_revision,
                                batch_size=int(ret["dense"]["batch_size"]),
                                max_length=int(ret["dense"]["max_length"]), device=_device())
         try:
@@ -250,14 +261,22 @@ def build_split(cfg: dict, split: str, *, docs: Mapping[str, str], questions: Ma
                 if scenario.qid not in questions:
                     raise KeyError(f"{scenario.qid} from {split} scenarios has no question row in "
                                    f"{artifacts.questions_path(resolve(cfg, 'data_processed'), split)}")
+            query_vecs = encoder.encode_queries([questions[s.qid] for s in todo])
+            if (query_vecs.shape != (len(todo), bank.vectors.shape[1])
+                    or not np.all(np.isfinite(query_vecs))):
+                raise ValueError(f"dense query embeddings have invalid shape/values: {query_vecs.shape}")
+            for scenario, query_vec in zip(todo, query_vecs):
                 ranking = rank_scenario(
                     scenario_id=scenario.scenario_id, qid=scenario.qid,
                     question=questions[scenario.qid],
                     docs=docs, corpus_doc_ids=list(scenario.corpus_doc_ids),
                     dense_bank=bank, dense_encoder=encoder, top_n=top_n,
-                    bm25_k1=float(ret["bm25"]["k1"]), bm25_b=float(ret["bm25"]["b"]))
+                    bm25_k1=float(ret["bm25"]["k1"]), bm25_b=float(ret["bm25"]["b"]),
+                    query_vec=query_vec)
                 row = ranking.to_row()
                 row["config_sha"] = config_sha
+                row["docs_sha"] = sha256_json({d: docs[d] for d in scenario.corpus_doc_ids})
+                row["question_sha"] = sha256_text(questions[scenario.qid])
                 rows[scenario.scenario_id] = row
         finally:
             encoder.unload()
@@ -389,7 +408,8 @@ def run(*, cfg: dict, profile: str, splits: Sequence[str] = SPLITS, force: bool 
             split_rankings, split_reach, stats = build_split(
                 cfg, split, docs=docs, questions=load_questions(cfg, split),
                 scenarios=scenarios_by_split[split], bank=bank, config_sha=config_sha,
-                force=force, cache_only=cache_only)
+                force=force, cache_only=cache_only,
+                dense_revision=bank_meta.get("revision"))
             rankings += split_rankings
             reach_rows += split_reach
             per_split[split] = stats

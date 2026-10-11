@@ -12,6 +12,7 @@ is visible and identical across transformers versions.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -77,8 +78,8 @@ class QATrainer:
 
 
 def total_steps(n_examples: int, *, batch_size: int, grad_accum: int, epochs: int) -> int:
-    per_step = max(1, batch_size * grad_accum)
-    steps_per_epoch = max(1, n_examples // per_step)
+    batches_per_epoch = math.ceil(n_examples / batch_size)
+    steps_per_epoch = max(1, math.ceil(batches_per_epoch / grad_accum))
     return steps_per_epoch * epochs
 
 
@@ -101,11 +102,13 @@ def train(*, model, tokenizer, rows: Sequence[Mapping[str, Any]], out_dir: str |
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
 
-    steps = max_steps or total_steps(len(rows), batch_size=batch_size, grad_accum=grad_accum,
-                                     epochs=epochs)
+    steps = (max_steps if max_steps is not None
+             else total_steps(len(rows), batch_size=batch_size, grad_accum=grad_accum,
+                              epochs=epochs))
     args = TrainingArguments(
         output_dir=str(out_dir / "_trainer"),
-        max_steps=steps,
+        max_steps=max_steps if max_steps is not None else -1,
+        num_train_epochs=epochs,
         learning_rate=lr,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
@@ -135,6 +138,9 @@ def train(*, model, tokenizer, rows: Sequence[Mapping[str, Any]], out_dir: str |
     summary = {
         "examples": len(rows),
         "steps": steps,
+        "global_step": trainer.state.global_step,
+        "epoch_reached": trainer.state.epoch,
+        "examples_planned": (len(rows) * epochs if max_steps is None else None),
         "epochs": epochs,
         "learning_rate": lr,
         "batch_size": batch_size,

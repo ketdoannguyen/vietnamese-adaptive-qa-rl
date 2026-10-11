@@ -18,7 +18,7 @@ from src.qa.postprocess import (NO_SPAN_SCORE, acceptance_constraint_met, apply_
 from src.qa.reader import ReaderPrediction, verify_provenance
 from src.qa.reader_eval import evaluate_predictions, gold_index, threshold_grid
 from src.qa.train_reader import (load_tokenizer, overfit_smoke, reader_model_hash,
-                                 tokenizer_hash, train)
+                                 tokenizer_hash, total_steps, train)
 
 BASE = "FacebookAI/xlm-roberta-base"
 CONTEXT = ("Hà Nội là thủ đô của Việt Nam từ năm 1945. "
@@ -389,6 +389,23 @@ def test_saved_reader_is_hashed_by_its_weights(tokenizer, tmp_path):
     model.save_pretrained(out)
     assert reader_model_hash(out) != first  # a changed checkpoint invalidates the cache
     assert tokenizer_hash(tokenizer) == tokenizer_hash(tokenizer)
+
+
+def test_total_steps_includes_last_partial_gradient_accumulation():
+    assert total_steps(10, batch_size=4, grad_accum=2, epochs=3) == 6
+    assert total_steps(1, batch_size=4, grad_accum=8, epochs=2) == 2
+
+
+def test_epoch_training_consumes_remainder_and_records_actual_steps(tokenizer, tmp_path):
+    fs = build_feature_set(_training_rows({"d1": CONTEXT}), {"d1": CONTEXT}, tokenizer,
+                           max_length=128, doc_stride=32)
+    rows = fs.rows()[:5]
+    summary = train(model=_tiny_model(tokenizer), tokenizer=tokenizer, rows=rows,
+                    out_dir=tmp_path / "epoch", epochs=2, lr=5e-4,
+                    batch_size=2, grad_accum=2, logging_steps=1, warmup_ratio=0.0)
+    assert summary["steps"] == summary["global_step"] == 4
+    assert summary["epoch_reached"] == 2
+    assert summary["examples_planned"] == 10
 
 
 def test_training_arguments_recorded_in_summary(tokenizer, tiny_model, tmp_path):

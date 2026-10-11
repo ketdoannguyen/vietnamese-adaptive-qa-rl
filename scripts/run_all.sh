@@ -85,6 +85,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import math
 import os
 import shlex
 import shutil
@@ -163,7 +164,7 @@ def stage_specs(cfg: dict) -> list[dict]:
              row={"split": "val_strict"}, gpu=True),
         dict(key="cache_reader_test", stage="P3_reader_cache",
              module="src.pipeline.cache_reader", args=["--splits", "test_strict"],
-             deps=["select_rl"], row={"splits": ["test_strict"]}, gpu=True),
+             deps=["select_rl"], row={"splits": ["test_strict"]}, needs_freeze=True, gpu=True),
         dict(key="eval_baselines_test", stage="P7_baselines",
              module="src.pipeline.eval_baselines", args=["--split", "test_strict"],
              deps=["eval_baselines_val", "cache_reader_test"], row={"split": "test_strict"},
@@ -712,6 +713,15 @@ def main(argv: list[str]) -> int:
         print(f"--stop-after: không có stage {args.stop_after!r}; hợp lệ: {', '.join(keys)}",
               file=sys.stderr)
         return 3
+    max_gpu_hours = (cfg.get("limits") or {}).get("max_gpu_hours")
+    budget_valid = (not isinstance(max_gpu_hours, bool)
+                    and isinstance(max_gpu_hours, (int, float))
+                    and 0 < max_gpu_hours <= 48
+                    and math.isfinite(max_gpu_hours))
+    if not budget_valid and not args.resume:
+        print("DỪNG: limits.max_gpu_hours phải >0, hữu hạn và <=48 trước khi chạy stage.",
+              file=sys.stderr)
+        return 3
 
     registry_path = resolve(cfg, "runs") / "index.jsonl"
     manifests_dir = resolve(cfg, "manifests") / "run_all"
@@ -809,6 +819,14 @@ def main(argv: list[str]) -> int:
         rows = read_registry(registry_path)
         plan = compute_plan(specs, profile, rows, manifests, base_sha)
         print(f"RECOVERY: đã đánh dấu INTERRUPTED {len(marked)} dòng: {', '.join(marked)}")
+
+    if not budget_valid:
+        registry.append(run_id=run_id, stage=ORCH_STAGE, status="BLOCKED",
+                        event="end", profile=profile,
+                        reason="limits.max_gpu_hours invalid after recovery")
+        print("DỪNG: recovery hoàn tất nhưng limits.max_gpu_hours không hợp lệ; "
+              "không chạy stage mới.", file=sys.stderr)
+        return 3
 
     print_plan(specs, plan, profile)
     executed: list[str] = []

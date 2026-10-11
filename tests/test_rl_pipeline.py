@@ -149,6 +149,11 @@ def test_cli_run_writes_model_plots_report_and_registry(p6, capsys):
     config = read_json(out / "config.json")
     assert config["seed"] == 3 and config["val_reward"] == summary["final_val"]["mean_reward"]
     assert config["val_action_counts"] == summary["final_val"]["action_counts"]
+    assert config["validation"]["mode"] == "fixed_qids"
+    assert config["validation"]["n_tune"] == 2
+    assert config["validation"]["n_report"] == 0
+    assert config["validation"]["independent_report"] is False
+    assert summary["final_val"]["episodes"] == 2
     assert config["worlds"] == {"train": 2, "val": 2, "excluded_ambiguous": 0,
                                "excluded_rate": 0.0}
     assert config["env_config"]["max_optional_search"] == 1  # cfg["rl"], not a default
@@ -257,6 +262,71 @@ def test_cli_help_exits_zero(capsys):
 
 # ------------------------------------------------------------------- split discipline
 
+def test_validation_partition_holds_out_whole_title_groups(p6, monkeypatch):
+    cfg, state, root = p6
+    marker = root / "questions_val_strict.parquet"
+    marker.write_bytes(b"stub")
+    monkeypatch.setattr(train_rl.data_artifacts, "questions_path", lambda *_: marker)
+    monkeypatch.setattr(train_rl.splitting, "title_groups", lambda *_: {
+        "toy:pos": "article-a", "toy:neg": "article-b"})
+    tune, details = train_rl.validation_partition(cfg, state["val"])
+    assert len(tune) == 1 and details["n_report"] == 1
+    assert details["independent_report"] is True
+    assert details["tune_qid_sha256"] == train_rl.sha256_json(tune)
+    assert train_rl.validation_partition(cfg, list(reversed(state["val"]))) == (tune, details)
+
+
+def test_training_uses_only_tune_group_for_checkpoint_selection(p6, monkeypatch):
+    cfg, state, root = p6
+    marker = root / "questions_val_strict.parquet"
+    marker.write_bytes(b"stub")
+    monkeypatch.setattr(train_rl.data_artifacts, "questions_path", lambda *_: marker)
+    monkeypatch.setattr(train_rl.splitting, "title_groups", lambda *_: {
+        "toy:pos": "article-a", "toy:neg": "article-b"})
+    summary = train_rl.run(cfg=cfg, profile="smoke", max_updates=2)
+    assert summary["validation"]["n_tune"] == 1
+    assert summary["validation"]["n_report"] == 1
+    assert summary["final_val"]["episodes"] == 1
+    assert all(row["val"]["episodes"] == 1 for row in read_jsonl(
+        _policy_dir(cfg) / train_rl.TRAIN_LOG_FILE) if "val" in row)
+
+
+def test_ambiguous_audit_export_parses_the_requested_split():
+    blob = {
+        "method": "lexical heuristic", "generated_by": "audit_split", "note": "unreviewed",
+        "splits": {
+            "train_strict": {"flagged_qids": ["train:a", "train:b"], "counts": {"flagged": 2}},
+            "val_strict": {"flagged_qids": ["val:a"], "counts": {"flagged": 1}},
+        },
+    }
+    assert worlds._parse_ambiguous(blob, "train_strict") == ["train:a", "train:b"]
+    assert worlds._parse_ambiguous(blob, "val_strict") == ["val:a"]
+    with pytest.raises(ValueError, match="missing split"):
+        worlds._parse_ambiguous(blob, "other_strict")
+    with pytest.raises(ValueError, match="flagged_qids"):
+        worlds._parse_ambiguous({"splits": {"train_strict": {"flagged_qids": 2}}},
+                                "train_strict")
+    assert worlds._parse_ambiguous({"qids": ["legacy:a"]}, "train_strict") == ["legacy:a"]
+
+
+def test_ambiguous_audit_export_reaches_training_exclusion(tmp_path):
+    cfg = _cfg(tmp_path)
+    path = worlds.ambiguous_negatives_path(cfg)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"splits": {
+        "train_strict": {"flagged_qids": ["toy:neg"]},
+        "val_strict": {"flagged_qids": ["toy:pos"]},
+    }}), encoding="utf-8")
+    train_flags = worlds.load_ambiguous_qids(cfg, "train_strict")
+    val_flags = worlds.load_ambiguous_qids(cfg, "val_strict")
+    bundle = WorldBundle(split="train_strict", worlds=[positive_world(), negative_world()],
+                         questions={}, docs={}, laya_fn=None, ambiguous_qids=train_flags)
+    kept, excluded, rate = train_rl.split_ambiguous(bundle)
+    assert {world.qid for world in kept} == {"toy:pos"}
+    assert excluded == ["toy:neg"] and rate == 0.5
+    assert val_flags == {"toy:pos"}
+
+
 def test_ambiguous_negatives_are_excluded_from_train_but_kept_in_val(p6):
     cfg, state, _ = p6
     state["ambiguous"] = frozenset({"toy:pos"})
@@ -345,7 +415,8 @@ def test_saved_checkpoint_reproduces_the_measured_greedy_actions(p6):
         worlds=[replace(w, split=train_rl.VAL_SPLIT) for w in state["val"]],
         questions={}, docs={}, laya_fn=None, ambiguous_qids=frozenset()))
     prior = lambda obs: np.full(4, 0.25)  # noqa: E731 - the fixture's frozen prior (constant)
-    kwargs = {"episodes": RLConfig.from_dict(cfg).eval_episodes, "device": torch.device("cpu")}
+    kwargs = {"episodes": 2, "qids": ["toy:neg", "toy:pos"],
+              "device": torch.device("cpu")}
     first = train_rl.evaluate(env, net, extractor, scaler_t, prior, **kwargs)
     second = train_rl.evaluate(env, net, extractor, scaler_t, prior, **kwargs)
     assert first == second  # greedy evaluation is deterministic
@@ -360,7 +431,7 @@ def test_early_stopping_stops_when_validation_stops_improving(p6, monkeypatch, c
                  "eval_episodes": 2}
 
     def flat_eval(env, net, extractor, scaler_t, laya_fn, *, episodes, device,
-                  seed_base=10_000):
+                  seed_base=10_000, qids=None):
         return {"mean_reward": 1.0, "std_reward": 0.0, "mean_length": 2.0,
                 "episodes": episodes, "action_counts": {"0": 1, "1": 1, "2": 0, "3": 2}}
 

@@ -41,9 +41,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from src.data import artifacts as data_artifacts
 from src.decision.laya_adapter import checkpoint_model_hash
 from src.decision.schema import ACTION_ORDER
 from src.decision.state_text import STATE_TEXT_VERSION
+from src.eval import splitting
 from src.pipeline import build_retrieval, worlds
 from src.pipeline.cache_reader import state_cache_paths
 from src.pipeline.worlds import WorldBundle, build_worlds
@@ -53,6 +55,7 @@ from src.rl.policy import PolicyNet
 from src.rl.reinforce import RLConfig, ReinforceTrainer, evaluate, rollout
 from src.rl.reward import RewardCalculator, RewardConfig
 from src.utils.config import add_profile_args, config_from_args, resolve, snapshot_config
+from src.utils.hashing import sha256_json
 from src.utils.io import atomic_write_json, read_jsonl, write_jsonl
 from src.utils.reproducibility import capture_library_versions, seed_everything
 from src.utils.runs import RunRegistry, now_iso
@@ -275,6 +278,31 @@ def write_plots(cfg: Mapping[str, Any], updates: Sequence[Mapping[str, Any]],
     return {"curve": curve_path, "histogram": histogram_path}
 
 
+def validation_partition(cfg: Mapping[str, Any], val_worlds: Sequence[EpisodeWorld]
+                         ) -> tuple[list[str], dict[str, Any]]:
+    """Fixed validation QIDs; reserve title-disjoint report groups when available."""
+    qids = sorted(world.qid for world in val_worlds)
+    questions = data_artifacts.questions_path(resolve(cfg, "data_processed"), VAL_SPLIT)
+    report_qids: list[str] = []
+    if questions.is_file():
+        groups = splitting.title_groups(cfg, VAL_SPLIT)
+        missing = set(qids) - set(groups)
+        if missing:
+            raise ValueError(f"validation worlds lack title groups: {sorted(missing)[:3]}")
+        subset = {qid: groups[qid] for qid in qids}
+        if len(set(subset.values())) >= 2:
+            qids, report_qids = splitting.group_holdout(subset, fraction=0.25, seed=42)
+    details = {"mode": "fixed_qids", "n_tune": len(qids),
+               "tune_qid_sha256": sha256_json(qids),
+               "n_report": len(report_qids), "report_qid_sha256": sha256_json(report_qids),
+               "independent_report": bool(report_qids),
+               "group_seed": 42, "report_fraction": 0.25,
+               "n_tune_groups": len({groups[qid] for qid in qids}) if questions.is_file() else None,
+               "n_report_groups": (len({groups[qid] for qid in report_qids})
+                                   if report_qids else 0)}
+    return qids, details
+
+
 def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
         limit: int | None = None, max_updates: int | None = None,
         laya_regime: str | None = None, dry_run: bool = False, device: str | None = None,
@@ -313,18 +341,22 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
               f"({excluded_rate:.1%} of {len(train_bundle.worlds)})")
         train_env = make_env(cfg, _replaced(train_bundle, train_worlds))
         val_env = make_env(cfg, val_bundle)
+        val_qids, validation = validation_partition(cfg, val_bundle.worlds)
         laya_fn = combined_prior([train_bundle, val_bundle], regime)
         prior = laya_reference(cfg, regime)
 
         trainer = ReinforceTrainer(train_env, val_env, rl_config, laya_fn=laya_fn,
-                                   device=device, run_dir=out_dir, seed=rl_config.seed)
+                                   device=device, run_dir=out_dir, seed=rl_config.seed,
+                                   val_qids=val_qids)
         # 2. Scaler on TRAIN rollouts only; the validation split must not inform features.
         scaler = trainer.fit_scaler()
         net = trainer.build()
 
         if dry_run:
             probe = {name: evaluate(env, net, trainer.extractor, trainer.scaler_t,
-                                    laya_fn, episodes=rl_config.eval_episodes,
+                                    laya_fn,
+                                    episodes=len(val_qids) if name == "val" else rl_config.eval_episodes,
+                                    qids=val_qids if name == "val" else None,
                                     device=trainer.device)
                      for name, env in (("train", train_env), ("val", val_env))}
             summary = {
@@ -334,7 +366,7 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
                                      "ambiguous_total": len(train_bundle.ambiguous_qids)},
                            "val": {"worlds": len(val_bundle.worlds)}},
                 "excluded_ambiguous": {"n": len(excluded), "rate": excluded_rate},
-                "scaler_features": len(scaler.mean), "probe": probe,
+                "validation": validation, "scaler_features": len(scaler.mean), "probe": probe,
             }
             registry.append(run_id=run_id, stage=STAGE, status="SUCCEEDED", profile=profile,
                             dry_run=True, probe=probe, note="no model or report written")
@@ -362,7 +394,7 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
         net = trainer.net
         assert net is not None
         final_val = evaluate(val_env, net, trainer.extractor, trainer.scaler_t,
-                             laya_fn, episodes=rl_config.eval_episodes,
+                             laya_fn, episodes=len(val_qids), qids=val_qids,
                              device=trainer.device)
         published_update = len(updates)
         trainer.save(out_dir)  # canonical policy.safetensors + scaler.json + rl_config.json
@@ -375,7 +407,7 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
             "best_update": int(result["best_update"]), "updates_ran": published_update,
             "stopped_early": bool(result["stopped_early"]),
             "val_reward": final_val["mean_reward"], "val_std_reward": final_val["std_reward"],
-            "val_action_counts": final_val["action_counts"],
+            "val_action_counts": final_val["action_counts"], "validation": validation,
             "laya": prior, "reader": reader,
             "retrieval_config_sha": build_retrieval.retrieval_config_sha(dict(cfg)),
             "reward_spec_hash": RewardConfig.from_dict(dict(cfg)).spec_hash(),
@@ -417,6 +449,7 @@ def run(*, cfg: Mapping[str, Any], profile: str, seed: int | None = None,
             "updates": published_update, "stopped_early": bool(result["stopped_early"]),
             "best_update": int(result["best_update"]),
             "best_val_reward": result["best_val_reward"], "final_val": final_val,
+            "validation": validation,
             "checkpoint_note": ("policy.safetensors is the trainer's best/ artifact — the "
                                 "weights saved at validation update best_update, never "
                                 "overwritten — and val_reward measures exactly them"),

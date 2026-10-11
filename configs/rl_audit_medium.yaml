@@ -1,0 +1,20 @@
+# Isolated RL audit of the frozen historical medium data, reader, and retrieval.
+# Do not run audit_split, cache_reader, or report with this overlay.
+data:
+  profile: medium
+paths:
+  data_processed: data/processed
+  data_scenarios: data/scenarios
+  data_cache: outputs/experiments/2026-10-10-rl-audit/data/cache
+  outputs: outputs/experiments/2026-10-10-rl-audit/outputs
+  models: outputs/experiments/2026-10-10-rl-audit/outputs/models
+  runs: outputs/experiments/2026-10-10-rl-audit/outputs/runs
+  predictions: outputs/experiments/2026-10-10-rl-audit/outputs/predictions
+  manifests: outputs/experiments/2026-10-10-rl-audit/outputs/manifests
+  diagnostics: outputs/experiments/2026-10-10-rl-audit/outputs/diagnostics
+  reports: outputs/experiments/2026-10-10-rl-audit/reports
+  plots: outputs/experiments/2026-10-10-rl-audit/reports/plots
+  tables: outputs/experiments/2026-10-10-rl-audit/reports/tables
+rl:
+  eval_every: 2
+  early_stop_patience: 10

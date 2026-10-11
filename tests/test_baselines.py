@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
+from src.decision.laya_adapter import checkpoint_model_hash
 from src.eval.correctness import CORRECTNESS_FEATURES, Calibrator, CorrectnessEstimator
 from src.eval.policies import (
     DEFAULT_TAU, RL_POLICY_DIR, BootstrapThenAnswerPolicy, ConfidenceThresholdPolicy,
@@ -102,7 +103,12 @@ def _save_rl_checkpoint(cfg: dict, *, regime: str) -> Path:
     net.save(directory / "policy.safetensors")
     dim = FeatureExtractor().dim
     FeatureScaler(mean=[0.0] * dim, std=[1.0] * dim).save(directory / "scaler.json")
-    atomic_write_json(directory / "config.json", {"laya": {"regime": regime}, "seed": 42})
+    prior = worlds.laya_checkpoint_dir(cfg, regime)
+    prior.mkdir(parents=True, exist_ok=True)
+    (prior / "model.safetensors").write_bytes(b"fake frozen weights")
+    (prior / "rl_agent_config.json").write_text("{}", encoding="utf-8")
+    atomic_write_json(directory / "config.json", {"laya": {
+        "regime": regime, "model_hash": checkpoint_model_hash(prior)}, "seed": 42})
     return directory
 
 
@@ -145,6 +151,29 @@ def _env(world_list, *, max_optional: int) -> AdaptiveQAEnv:
     config = EnvConfig(max_optional_search=max_optional, bootstrap_tool="bm25",
                        bootstrap_passages=1, passage_per_search_action=1)
     return AdaptiveQAEnv(list(world_list), RewardCalculator(RewardConfig()), config)
+
+
+def test_evaluation_never_writes_the_registered_training_prior_cache(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    checkpoint = worlds.laya_checkpoint_dir(cfg, "ce")
+    checkpoint.mkdir(parents=True)
+    frozen_cache = worlds.laya_cache_dir(cfg, "ce")
+    frozen_cache.mkdir(parents=True)
+    sentinel = frozen_cache / "unchanged.bin"
+    sentinel.write_bytes(b"frozen")
+    seen = []
+
+    def prewarm(_cfg, _regime, _checkpoint, _requests, *, cache_dir=None):
+        seen.append(cache_dir)
+        return _fake_prior
+
+    monkeypatch.setattr(worlds, "prewarm_prior", prewarm)
+    eb.regime_prior_fn(cfg, "ce", _worlds(VAL), RewardCalculator(RewardConfig()),
+                       worlds.env_config(cfg))
+
+    assert seen and all(path is not None and not Path(path).is_relative_to(frozen_cache)
+                        for path in seen)
+    assert sentinel.read_bytes() == b"frozen"
 
 
 # ----------------------------------------------------------------- policy unit tests
@@ -433,6 +462,21 @@ def test_skip_reason_gates_the_b8_checkpoint_and_the_prior_regime(p7):
     mismatch = eb.skip_reason(specs["E06"], cfg, status)
     assert "laya.regime='ce'" in mismatch and "needs 'rlcd'" in mismatch
     assert "fabricated" in mismatch
+
+
+def test_b8_refuses_prior_checkpoint_replaced_after_rl_selection(p7):
+    cfg, _, root = p7
+    _save_rl_checkpoint(cfg, regime="rlcd")
+    prior = worlds.laya_checkpoint_dir(cfg, "rlcd")
+    (prior / "model.safetensors").write_bytes(b"different weights")
+    assert eb.main(["--config", str(_overlay(root, cfg)), "--profile", "smoke",
+                    "--policy", "B1,B8"]) == 0
+    rows = {row["exp_id"]: row for row in
+            _read_csv_rows(Path(cfg["paths"]["tables"]) / "baseline_results_val.csv")}
+    assert rows["E00"]["status"] == "SUCCEEDED"
+    assert rows["E06"]["status"] == "FAILED"
+    assert "model_hash" in rows["E06"]["reason"]
+    assert rows["E06"]["mean_episode_reward"] == "N/A"
 
 
 def test_a_broken_row_is_failed_without_losing_the_others(p7, monkeypatch):

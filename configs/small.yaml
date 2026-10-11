@@ -1,0 +1,4 @@
+# Profile overlay: 1,000 questions per strict split for bounded evaluation.
+# The cap lives in base.yaml; this overlay records the profile in run snapshots.
+data:
+  profile: small

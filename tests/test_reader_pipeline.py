@@ -25,7 +25,7 @@ from src.qa.train_reader import load_tokenizer, reader_model_hash
 from src.retrieval.states import reachable_states, retrieved_doc_ids
 from src.utils.config import load_config
 from src.utils.hashing import sha256_file
-from src.utils.io import read_json, read_jsonl, write_jsonl, write_parquet
+from src.utils.io import read_json, read_jsonl, write_jsonl, write_parquet, write_yaml
 from src.utils.runs import RunRegistry
 
 BASE = "FacebookAI/xlm-roberta-base"
@@ -548,6 +548,29 @@ def test_cache_reader_writes_every_reachable_state(cfg, monkeypatch):
 def _read_parquet(path) -> list[dict]:
     import pyarrow.parquet as pq
     return pq.read_table(str(path)).to_pylist()
+
+
+def test_test_cache_refuses_without_selection_before_any_write(cfg):
+    manifest_dir = Path(cfg["paths"]["manifests"])
+    assert not (manifest_dir / "best_selection.json").exists()
+    with pytest.raises(RuntimeError, match="test_strict reader cache requires a frozen selection"):
+        cache_reader.run(cfg=cfg, profile="smoke", splits=("test_strict",))
+    assert not cache_reader.state_cache_paths(cfg, "test_strict")[0].exists()
+    assert not (Path(cfg["paths"]["runs"]) / "index.jsonl").exists()
+    overlay = manifest_dir.parent / "cache_reader_test_overlay.yaml"
+    write_yaml(overlay, {"paths": cfg["paths"]})
+    with pytest.raises(RuntimeError, match="test_strict reader cache requires a frozen selection"):
+        cache_reader.main(["--profile", "smoke", "--splits", "test_strict",
+                           "--config", str(overlay)])
+    assert not (manifest_dir / "P3_reader_cache_smoke_config.yaml").exists()
+
+
+def test_test_cache_after_freeze_reaches_reader_precondition(cfg):
+    manifest_dir = Path(cfg["paths"]["manifests"])
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "best_selection.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="reader training step"):
+        cache_reader.run(cfg=cfg, profile="smoke", splits=("test_strict",))
 
 
 def test_cache_reader_needs_the_frozen_reader(cfg, monkeypatch):

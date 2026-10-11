@@ -135,9 +135,20 @@ def build_split_cache(cfg: Mapping[str, Any], split: str, *, profile: str, limit
             **{k: v for k, v in stats.items() if not isinstance(v, list)}}
 
 
+def require_test_freeze(cfg: Mapping[str, Any], splits: Sequence[str]) -> None:
+    if "test_strict" in splits:
+        from src.pipeline.eval_baselines import selection_freeze_path
+
+        freeze = selection_freeze_path(cfg)
+        if not freeze.is_file():
+            raise RuntimeError(f"test_strict reader cache requires a frozen selection at "
+                               f"{freeze}; refusing before any cache or registry write")
+
+
 def run(*, cfg: dict, profile: str, splits: Sequence[str] = CACHE_SPLITS,
         limit_override: int | None = None,
         registry: RunRegistry | None = None) -> dict[str, Any]:
+    require_test_freeze(cfg, splits)
     reader_cfg = cfg["reader"]
     run_id = f"p3-reader-cache-{profile}-{now_iso().replace(':', '')}"
     registry = registry or RunRegistry(resolve(cfg, "runs") / "index.jsonl")
@@ -195,6 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile = args.profile or cfg["data"]["profile"]
     cfg["data"]["profile"] = profile
     splits = tuple(s.strip() for s in args.splits.split(",") if s.strip())
+    require_test_freeze(cfg, splits)
     snapshot_config(cfg, resolve(cfg, "manifests") / f"P3_reader_cache_{profile}_config.yaml")
     summary = run(cfg=cfg, profile=profile, splits=splits, limit_override=args.limit)
     if args.json:

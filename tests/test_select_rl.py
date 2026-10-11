@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from src.decision.laya_adapter import checkpoint_model_hash
 from src.eval.policies import load_rl_policy, rl_checkpoint_dir, rl_checkpoint_status
 from src.pipeline import build_retrieval, select_rl, train_rl
 from src.pipeline.eval_baselines import selection_freeze_path
@@ -32,7 +33,8 @@ def _archive(cfg: dict, *, seed: int, val_reward: float, regime: str = "rlcd",
              registry: bool = True, registry_seed: int | None = None,
              registry_val_reward: float | None = None, registry_status: str = "SUCCEEDED",
              retrieval_sha: str | None = None, reader: dict | None = None,
-             eval_episodes: int | None = None, incomplete: bool = False) -> Path:
+             eval_episodes: int | None = None, incomplete: bool = False,
+             validation: dict | None = None) -> Path:
     """A fully synthetic P6_rl archive (+ registry rows) with controllable fingerprints."""
     run_id = run_id or f"p6-rl-{profile}-{seed}-2026-10-09T0000{seed:02d}"
     archive = train_rl.archive_dir(cfg, run_id)
@@ -40,7 +42,9 @@ def _archive(cfg: dict, *, seed: int, val_reward: float, regime: str = "rlcd",
     config = {
         "stage": train_rl.STAGE, "run_id": run_id, "profile": profile, "seed": seed,
         "val_reward": val_reward, "val_std_reward": 0.01, "best_update": 10, "updates_ran": 12,
-        "laya": {"regime": regime, "model_hash": "m" * 64, "checkpoint_ref": "/tmp/fake"},
+        "laya": {"regime": regime,
+                 "model_hash": checkpoint_model_hash(_fake_checkpoint(cfg, regime)),
+                 "checkpoint_ref": "/tmp/fake"},
         "reader": {split: dict(READER_HASHES) for split in SPLITS},
         "retrieval_config_sha": retrieval_sha or build_retrieval.retrieval_config_sha(dict(cfg)),
         "reward_spec_hash": RewardConfig.from_dict(dict(cfg)).spec_hash(),
@@ -49,6 +53,8 @@ def _archive(cfg: dict, *, seed: int, val_reward: float, regime: str = "rlcd",
     }
     if reader is not None:
         config["reader"] = reader
+    if validation is not None:
+        config["validation"] = validation
     write_json(archive / train_rl.CONFIG_FILE, config)
     for name, payload in (("policy.safetensors", f"policy-{seed}"),
                           ("scaler.json", "{}"), ("rl_config.json", "{}"),
@@ -143,6 +149,19 @@ def test_non_frozen_regime_archives_are_excluded_with_a_reason(p6):
                for item in freeze["excluded"])
 
 
+def test_selection_refuses_mixed_validation_protocols(p6):
+    cfg, _, _ = p6
+    cfg["laya"]["frozen"] = "rlcd"
+    fixed = {"mode": "fixed_qids", "n_tune": 2, "tune_qid_sha256": "a" * 64,
+             "n_report": 1, "report_qid_sha256": "b" * 64,
+             "independent_report": True}
+    _archive(cfg, seed=42, val_reward=1.0, validation=fixed)
+    _archive(cfg, seed=43, val_reward=9.0)
+    with pytest.raises(select_rl.SelectionRefused, match="validation protocol"):
+        select_rl.run(cfg=cfg, profile="smoke", now="2026-10-09T05:00:00+00:00")
+    assert _freeze_or_none(cfg) is None
+
+
 def test_stale_chain_archives_are_excluded(p6):
     cfg, _, _ = p6
     cfg["laya"]["frozen"] = "rlcd"
@@ -156,6 +175,17 @@ def test_stale_chain_archives_are_excluded(p6):
     reasons = {item["seed"]: item["reason"] for item in freeze["excluded"]}
     assert "retrieval_config_sha" in reasons[42]
     assert "reader train_strict reader_model_hash" in reasons[43]
+
+
+def test_stale_laya_checkpoint_is_excluded_before_freeze(p6):
+    cfg, _, _ = p6
+    cfg["laya"]["frozen"] = "rlcd"
+    _archive(cfg, seed=42, val_reward=9.9)
+    checkpoint = _fake_checkpoint(cfg, "rlcd")
+    (checkpoint / "model.safetensors").write_bytes(b"new weights")
+    with pytest.raises(select_rl.SelectionRefused, match="no eligible.*laya.model_hash"):
+        select_rl.run(cfg=cfg, profile="smoke", now="2026-10-09T05:00:00+00:00")
+    assert _freeze_or_none(cfg) is None
 
 
 def test_other_profile_or_unregistered_archives_are_excluded(p6):

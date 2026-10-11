@@ -1,0 +1,26 @@
+# Isolated 5,000-train-question pilot; medium leaves all strict validation/test rows intact.
+data:
+  train_cap: 5000
+retrieval:
+  dense:
+    revision: 614241f622f53c4eeff9890bdc4f31cfecc418b3
+reader:
+  revision: e73636d4f797dec63c3081bb6ed5c7b0bb3f2089
+paths:
+  data_raw: outputs/experiments/gliner-laya-5000/data/raw
+  data_processed: outputs/experiments/gliner-laya-5000/data/processed
+  data_scenarios: outputs/experiments/gliner-laya-5000/data/scenarios
+  data_indexes: outputs/experiments/gliner-laya-5000/data/indexes
+  data_cache: outputs/experiments/gliner-laya-5000/data/cache
+  data_diagnostics: outputs/experiments/gliner-laya-5000/data/diagnostics
+  outputs: outputs/experiments/gliner-laya-5000/outputs
+  models: outputs/experiments/gliner-laya-5000/outputs/models
+  runs: outputs/experiments/gliner-laya-5000/outputs/runs
+  predictions: outputs/experiments/gliner-laya-5000/outputs/predictions
+  manifests: outputs/experiments/gliner-laya-5000/outputs/manifests
+  diagnostics: outputs/experiments/gliner-laya-5000/outputs/diagnostics
+  reports: outputs/experiments/gliner-laya-5000/reports
+  plots: outputs/experiments/gliner-laya-5000/reports/plots
+  tables: outputs/experiments/gliner-laya-5000/reports/tables
+limits:
+  max_gpu_hours: 48

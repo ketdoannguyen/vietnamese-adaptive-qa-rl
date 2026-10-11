@@ -158,6 +158,14 @@ def test_stage_args_cannot_override_training_paths_or_force_artifacts(tmp_path):
     assert valid.returncode == 0, valid.stdout + valid.stderr
 
 
+def test_stage_args_cannot_recap_frozen_validation(tmp_path):
+    root = setup(tmp_path, "from pathlib import Path\nPath('marker').write_text('launched')")
+    for option in ("--limit", "--limit=1000"):
+        result = run(root, "--", option, "1000")
+        assert result.returncode != 0, option
+    assert not (root / "marker").exists() and not ledger(root).path.exists()
+
+
 def test_watchdog_cannot_exceed_remaining_budget(tmp_path):
     root = setup(tmp_path, "from pathlib import Path\nPath('marker').write_text('launched')")
     assert run(root, "--timeout-seconds", "160").returncode != 0
@@ -191,6 +199,32 @@ def test_cpu_teacher_launch_is_namespaced_and_not_billed(tmp_path):
     )
     command = cmd(root, "--cpu-stage")
     command[command.index(STAGE)] = "src.pipeline.make_teacher"
+    command[command.index("--forecast-seconds"):command.index("--timeout-seconds")] = []
+    result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    events = ledger(root)._rows()
+    assert events[0]["gpu"] is False and events[-1]["status"] == "SUCCEEDED"
+    assert ledger(root).spent_seconds() == 0
+    logs = list((root / "outputs/experiments/probe/diagnostics/cpu_stage").glob("*.log"))
+    assert len(logs) == 1
+    info = json.loads(logs[0].read_text().splitlines()[0])
+    assert info["command"][info["command"].index("--config") + 1].startswith(
+        str(root / "outputs/experiments/probe")
+    )
+    assert len(list((root / "outputs/experiments/probe/diagnostics/cpu_stage").glob("*.seen"))) == 1
+
+
+def test_cpu_split_launch_is_namespaced_and_not_billed(tmp_path):
+    root = setup(tmp_path)
+    (root / "src/pipeline/audit_split.py").write_text(
+        "import argparse\nfrom pathlib import Path\n"
+        "p = argparse.ArgumentParser()\np.add_argument('--profile')\np.add_argument('--config')\n"
+        "args = p.parse_args()\n"
+        "Path(args.config).with_suffix('.seen').write_text(args.profile)\n",
+        encoding="utf-8",
+    )
+    command = cmd(root, "--cpu-stage")
+    command[command.index(STAGE)] = "src.pipeline.audit_split"
     command[command.index("--forecast-seconds"):command.index("--timeout-seconds")] = []
     result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

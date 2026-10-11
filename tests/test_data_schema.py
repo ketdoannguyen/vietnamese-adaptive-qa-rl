@@ -223,6 +223,40 @@ def test_parquet_label_store_roundtrip_and_label_free_documents(tmp_path):
     assert manifest["strict_split"]["splits"][strict_split]["docs_emitted"] == len(docs)
 
 
+def test_train_only_cap_preserves_uncapped_validation_and_test_artifacts(tmp_path):
+    baseline, _ = fx.run_fixture_pipeline(tmp_path / "baseline", profile="full",
+                                          caps={"full": None})
+    limited, _ = fx.run_fixture_pipeline(tmp_path / "limited", profile="medium",
+                                         caps={"medium": 20}, train_cap=6)
+
+    assert limited["train_cap"] == 6
+    assert baseline["strict_split"]["splits"]["train_strict"]["rows_emitted"] > 6
+    assert limited["strict_split"]["caps"]["train_strict"]["requested"] == 6
+    assert limited["strict_split"]["caps"]["train_strict"]["applied"] is True
+    assert limited["strict_split"]["splits"]["train_strict"]["rows_emitted"] == 6
+    for split in ("val", "test"):
+        name = f"{split}_strict"
+        assert limited["strict_split"]["caps"][name]["applied"] is False
+        assert limited["strict_split"]["splits"][name]["rows_emitted"] == \
+            baseline["strict_split"]["splits"][name]["rows_emitted"]
+        for artifact in (f"questions_{name}", f"docs_{name}", f"scenarios_{split}",
+                         f"qids_{name}"):
+            assert limited["artifacts"][artifact]["sha256"] == \
+                baseline["artifacts"][artifact]["sha256"]
+    assert limited["leakage"]["pass"] is True
+
+
+@pytest.mark.parametrize("train_cap", [0, -1, True, "6", 1.5])
+def test_train_cap_rejects_invalid_values_before_writing(tmp_path, train_cap):
+    from src.pipeline.audit_split import run
+
+    cfg = fx.fixture_config(tmp_path, caps={"full": None})
+    cfg["data"]["train_cap"] = train_cap
+    with pytest.raises(ValueError, match="data.train_cap"):
+        run(cfg=cfg, profile="full")
+    assert not (tmp_path / "runs" / "index.jsonl").exists()
+
+
 def test_scenario_rows_keep_labels_out_of_the_public_part(tmp_path):
     fx.run_fixture_pipeline(tmp_path)
     # the scenarios live under cfg['paths']['data_scenarios'] — the layout

@@ -41,7 +41,8 @@ import argparse
 import json
 import os
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -58,8 +59,13 @@ REVISION = "19613082c7ef128647d561472d1e150ca878fb22"
 BASE_URL = "https://api.ai-box.vn/v1"
 MODEL = "ds/deepseek-flash"
 MODEL_REVISION = "provider-managed-alias"
+GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+GO_MODEL = "deepseek-v4.1-flash"
+GO_KEY_ENV = "OPENCODE_GO_API_KEY"
 MESSAGE_VERSION = "openai-chat-user-v1"
 MAX_REQUESTS = 50
+# Two additional attempts authorized after three prompts exhausted transport retries.
+MAX_ATTEMPTS_PER_PROMPT = 5
 SNAP = (Path.home() / ".cache/huggingface/hub/datasets--ura-hcmut--VixSTORY"
         / "snapshots" / REVISION)
 CORPUS_PATH = SNAP / "corpus/corpus.parquet"
@@ -71,9 +77,9 @@ DEFAULT_RANKINGS = (Path("outputs/experiments/2026-10-11-vixstory-diagnosis")
 TOOLS = ("bm25", "dense")
 
 SEARCH_COST = 0.05
-# The provider counts internal reasoning against max_tokens; observed 2048-token calls
-# sometimes consumed the entire allowance without producing a final answer.
-MAX_NEW_TOKENS = 4096
+# The provider counts reasoning against max_tokens; two reachable prompts exhausted 4096
+# and 8192, respectively, then completed in isolated probes at 8192 and 16384.
+MAX_NEW_TOKENS = 16384
 MAX_PROMPT_CHARS = 12_000
 # The pilot allows longer natural-retrieval states; both warm-up and world assembly use this
 # cap, while the reader checks the actual tokenized model-context budget before generation.
@@ -81,7 +87,7 @@ PILOT_MAX_PROMPT_CHARS = 20_000
 REWARD_TAU = 0.5
 
 # Bump this whenever ``reader_prompt`` changes; it is part of the cache identity.
-PROMPT_VERSION = "v2-question-prefix"
+PROMPT_VERSION = "v3-complete-concise"
 # Envelope format for the generation cache. Legacy files (a bare prompt->response dict) do
 # not carry it and are refused.
 CACHE_VERSION = 2
@@ -145,6 +151,7 @@ class GenerationCache:
         self.identity = identity
         self.attempts = 0
         self.failures: dict[str, str] = {}
+        self.retries: dict[str, int] = {}
         self.provider_observed = False
         self.provider_model: str | None = None
         self.provider_fingerprint: str | None = None
@@ -178,6 +185,12 @@ class GenerationCache:
                 isinstance(k, str) and isinstance(v, str) for k, v in failures.items()):
             raise ValueError(f"{self.path} has malformed failure records")
         self.failures = failures
+        retries = data.get("retries", {})
+        if not isinstance(retries, dict) or not all(
+                isinstance(k, str) and isinstance(v, int) and v >= 0
+                for k, v in retries.items()):
+            raise ValueError(f"{self.path} has malformed retry counts")
+        self.retries = retries
         if entries and "provider_observed" not in data:
             raise ValueError(f"{self.path} has no provider identity metadata")
         self.provider_observed = data.get("provider_observed", False)
@@ -212,6 +225,7 @@ class GenerationCache:
                                       "identity": self.identity.as_dict(),
                                       "attempts": self.attempts,
                                       "failures": self.failures,
+                                      "retries": self.retries,
                                       "provider_observed": self.provider_observed,
                                       "provider_model": self.provider_model,
                                       "provider_fingerprint": self.provider_fingerprint,
@@ -257,9 +271,11 @@ def answer_reward(f1: float, citation_valid: bool, *, gate_citation: bool = True
 def reader_prompt(question: str, passages: Sequence[Mapping]) -> str:
     """Prompt built from *visible* passages only; never carries a reference answer."""
     rendered = "\n\n".join(f"[{p['context_id']}] {p['text']}" for p in passages)
-    return ("Đọc các đoạn văn bản và trả lời câu hỏi bằng tiếng Việt. Trả lời đầy đủ các ý "
-            "được hỏi, chỉ dựa trên đoạn đã cho; không suy đoán hoặc sao chép thông tin thừa. "
-            "Nếu không có đủ thông tin, trả lời dựa trên phần thấy được hoặc để answer rỗng. "
+    return ("Đọc các đoạn văn bản và trả lời câu hỏi bằng tiếng Việt. Trong answer, nêu "
+            "đầy đủ các thực thể, sự kiện, quan hệ và điều kiện được hỏi bằng câu văn tự nhiên; "
+            "không chỉ trả lời một cụm từ khi câu hỏi đòi hỏi giải thích hoặc nhiều ý. "
+            "Chỉ dùng thông tin trong các đoạn đã cho, không thêm diễn giải hoặc chi tiết "
+            "ngoài câu hỏi. Nếu thiếu thông tin, chỉ nêu phần có căn cứ hoặc để answer rỗng. "
             'Trả về đúng JSON: {"answer":"<câu trả lời>","citations":["<ID đoạn đã dùng>"]}. '
             "Không viết gì ngoài JSON.\n"
             f"Câu hỏi: {question}\nĐoạn văn:\n{rendered}")
@@ -367,13 +383,25 @@ def _load() -> tuple[dict[str, Mapping], list[Mapping]]:
     return docs, [train[qid] for qid in qids]
 
 
+@dataclass(frozen=True)
+class CloudAttempt:
+    text: str | None = None
+    model: str | None = None
+    fingerprint: str | None = None
+    usage: dict | None = None
+    reason: str | None = None
+    retryable: bool = False
+
+
 class CloudReader:
     """Explicit, bounded cache warm-up; locked evaluation only reads the cache."""
 
     def __init__(self, cache_path: Path, *, identity: CacheIdentity,
                  max_requests: int = MAX_REQUESTS, client: httpx.Client | None = None) -> None:
-        if identity.model != MODEL or identity.base_url != BASE_URL:
-            raise ValueError("cloud reader identity does not match the configured endpoint/model")
+        if (identity.model, identity.base_url) not in (
+                (MODEL, BASE_URL), (GO_MODEL, GO_BASE_URL)):
+            raise ValueError("cloud reader identity does not match a configured endpoint/model")
+        self.key_env = GO_KEY_ENV if identity.base_url == GO_BASE_URL else "AIBOX_API_KEY"
         if max_requests < 0:
             raise ValueError("max_requests must not be negative")
         self.cache = GenerationCache(cache_path, identity)
@@ -385,85 +413,167 @@ class CloudReader:
         self.usage: list[dict] = []
         self.client = client or httpx.Client(timeout=45, transport=httpx.HTTPTransport(retries=0))
 
-    def generate(self, prompts: Sequence[str]) -> list[str]:
+    def _attempt(self, prompt: str, key: str) -> CloudAttempt:
+        reason = "invalid response shape"
+        retryable = False
+        try:
+            response = self.client.post(
+                f"{self.identity.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"model": self.identity.model, "messages": [{"role": "user", "content": prompt}],
+                      "temperature": 0, "max_tokens": self.max_new_tokens},
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"cloud reader HTTP {response.status_code}")
+            payload = response.json()
+            choice = payload["choices"][0]
+            text = choice["message"]["content"]
+            if choice.get("finish_reason") == "length":
+                raise ValueError("cloud response exhausted output budget")
+            if choice.get("finish_reason") not in ("stop", "end_turn"):
+                raise ValueError("cloud response did not complete normally")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("empty cloud reader response")
+            model = payload.get("model")
+            fingerprint = payload.get("system_fingerprint")
+            if model is not None and (not isinstance(model, str) or not model):
+                raise ValueError("invalid cloud model echo")
+            if model is not None and model not in (
+                    self.identity.model, self.identity.model.rsplit("/", 1)[-1]):
+                raise ValueError("cloud model identity changed during run")
+            if fingerprint is not None and not isinstance(fingerprint, str):
+                raise ValueError("invalid cloud fingerprint echo")
+            usage = payload.get("usage")
+            record = None
+            if isinstance(usage, dict):
+                record = {k: v for k, v in usage.items()
+                          if k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                          and isinstance(v, int)}
+                for source, fields in (("prompt_tokens_details", ("cached_tokens",)),
+                                       ("completion_tokens_details", ("reasoning_tokens",))):
+                    details = usage.get(source)
+                    if isinstance(details, dict):
+                        record.update({field: details[field] for field in fields
+                                       if isinstance(details.get(field), int)})
+            return CloudAttempt(text=text, model=model, fingerprint=fingerprint, usage=record)
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, RuntimeError) as exc:
+            if isinstance(exc, httpx.HTTPError):
+                reason = "transport error"
+            elif isinstance(exc, RuntimeError) and str(exc).startswith("cloud reader HTTP "):
+                reason = str(exc)
+                retryable = reason in ("cloud reader HTTP 408", "cloud reader HTTP 429",
+                                       "cloud reader HTTP 500", "cloud reader HTTP 502",
+                                       "cloud reader HTTP 503", "cloud reader HTTP 504")
+            elif isinstance(exc, ValueError) and str(exc) in (
+                    "empty cloud reader response", "cloud response did not complete normally",
+                    "cloud response exhausted output budget",
+                    "invalid cloud model echo", "invalid cloud fingerprint echo",
+                    "cloud model identity changed during run"):
+                reason = str(exc)
+            else:
+                reason = "invalid response shape"
+            retryable = retryable or reason in (
+                "transport error", "empty cloud reader response",
+                "cloud response did not complete normally", "invalid response shape")
+            return CloudAttempt(reason=reason, retryable=retryable)
+
+    def generate(self, prompts: Sequence[str], *, workers: int = 1) -> list[str]:
+        if not 1 <= workers <= 10:
+            raise ValueError("cloud workers must be between 1 and 10")
         missing = [p for p in dict.fromkeys(prompts) if p not in self.cache]
-        if missing and not os.environ.get("AIBOX_API_KEY"):
-            raise RuntimeError("AIBOX_API_KEY is not set; cloud generation skipped")
+        if missing and not os.environ.get(self.key_env):
+            raise RuntimeError(f"{self.key_env} is not set; cloud generation skipped")
         for prompt in missing:
             if len(prompt) > PILOT_MAX_PROMPT_CHARS:
                 raise ValueError("cloud reader prompt exceeds character budget")
             if prompt in self.cache.failures:
                 raise RuntimeError(f"cloud prompt has a recorded failure ({self.cache.failures[prompt]}); "
                                    "not retrying without a new reader identity")
-            if self.cache.attempts >= self.max_requests:
-                raise RuntimeError("cloud request cap reached; cache contains only completed prompts")
-            key = os.environ["AIBOX_API_KEY"]
-            self.requests += 1
-            self.cache.attempts += 1
-            self.flush()
-            error = None
-            try:
-                response = self.client.post(
-                    f"{BASE_URL}/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
-                          "temperature": 0, "max_tokens": self.max_new_tokens},
-                )
-                if response.status_code != 200:
-                    raise RuntimeError(f"cloud reader HTTP {response.status_code}")
-                payload = response.json()
-                choice = payload["choices"][0]
-                text = choice["message"]["content"]
-                if not isinstance(text, str) or not text.strip():
-                    raise ValueError("empty cloud reader response")
-                if choice.get("finish_reason") not in ("stop", "end_turn"):
-                    raise ValueError("cloud response did not complete normally")
-                model = payload.get("model")
-                fingerprint = payload.get("system_fingerprint")
-                if model is not None and (not isinstance(model, str) or not model):
-                    raise ValueError("invalid cloud model echo")
-                if fingerprint is not None and not isinstance(fingerprint, str):
-                    raise ValueError("invalid cloud fingerprint echo")
-                if self.cache.provider_observed and (model != self.cache.provider_model or
-                                                     fingerprint != self.cache.provider_fingerprint):
-                    raise ValueError("cloud model identity changed during run")
-                self.cache.provider_observed = True
-                self.cache.provider_model = model
-                self.cache.provider_fingerprint = fingerprint
-                usage = payload.get("usage")
-                if isinstance(usage, dict):
-                    record = {k: v for k, v in usage.items()
-                              if k in ("prompt_tokens", "completion_tokens", "total_tokens")
-                              and isinstance(v, int)}
-                    for source, fields in (("prompt_tokens_details", ("cached_tokens",)),
-                                           ("completion_tokens_details", ("reasoning_tokens",))):
-                        details = usage.get(source)
-                        if isinstance(details, dict):
-                            record.update({key: details[key] for key in fields
-                                           if isinstance(details.get(key), int)})
-                    self.usage.append(record)
-            except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, RuntimeError) as exc:
-                if isinstance(exc, httpx.HTTPError):
-                    reason = "transport error"
-                elif isinstance(exc, RuntimeError) and str(exc).startswith("cloud reader HTTP "):
-                    reason = str(exc)
-                elif isinstance(exc, ValueError) and str(exc) in (
-                        "empty cloud reader response", "cloud response did not complete normally",
-                        "invalid cloud model echo", "invalid cloud fingerprint echo",
-                        "cloud model identity changed during run"):
-                    reason = str(exc)
-                else:
-                    reason = "invalid response shape"
-                error = f"cloud reader request failed ({reason}); response and credentials withheld"
-            if error is not None:
-                if reason in ("empty cloud reader response", "cloud response did not complete normally",
-                              "cloud model identity changed during run"):
-                    self.cache.failures[prompt] = reason
+            if self.cache.retries.get(prompt, 0) >= MAX_ATTEMPTS_PER_PROMPT:
+                raise RuntimeError("cloud prompt exhausted its retry limit; cache incomplete")
+        pending = deque((prompt, 0.0) for prompt in missing)
+        active = {}
+        error = None
+        terminal_error = False
+        cap_reached = False
+        key = os.environ.get(self.key_env, "")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while pending or active:
+                ready = []
+                if error is None and not cap_reached:
+                    now = time.monotonic()
+                    for _ in range(len(pending)):
+                        prompt, due = pending.popleft()
+                        # Establish the provider echo from one response before parallel dispatch.
+                        limit = workers if self.cache.provider_observed else 1
+                        if len(active) + len(ready) < limit and due <= now:
+                            if self.cache.attempts >= self.max_requests:
+                                cap_reached = True
+                                pending.appendleft((prompt, due))
+                                break
+                            self.requests += 1
+                            self.cache.attempts += 1
+                            self.cache.retries[prompt] = self.cache.retries.get(prompt, 0) + 1
+                            ready.append(prompt)
+                        else:
+                            pending.append((prompt, due))
+                    if ready:
+                        # Persist every reservation before any worker can send its HTTP request.
+                        self.flush()
+                        for prompt in ready:
+                            active[pool.submit(self._attempt, prompt, key)] = prompt
+                if not active:
+                    if error is not None or cap_reached:
+                        break
+                    if pending:
+                        time.sleep(max(0, min(due for _, due in pending) - time.monotonic()))
+                    continue
+                timeout = (max(0, min(due for _, due in pending) - time.monotonic())
+                           if pending and error is None and not cap_reached
+                           and len(active) < workers else None)
+                try:
+                    completed, _ = wait(active, timeout=timeout, return_when=FIRST_COMPLETED)
+                except KeyboardInterrupt:
+                    # Let in-flight requests finish, then persist their results before stopping.
+                    completed = set(active)
+                    error = "cloud warm-up interrupted after in-flight requests completed"
+                for future in completed:
+                    prompt = active.pop(future)
+                    result = future.result()
+                    if result.reason is not None:
+                        if result.retryable and self.cache.retries[prompt] < MAX_ATTEMPTS_PER_PROMPT:
+                            if error is None:
+                                delay = min(4, 2 ** (self.cache.retries[prompt] - 1))
+                                pending.append((prompt, time.monotonic() + delay))
+                        else:
+                            if not result.retryable:
+                                self.cache.failures[prompt] = result.reason
+                            if error is None or (not result.retryable and not terminal_error):
+                                error = (f"cloud reader request failed ({result.reason}); "
+                                         "response and credentials withheld")
+                                terminal_error = not result.retryable
+                    elif self.cache.provider_observed and (
+                            result.model != self.cache.provider_model or
+                            result.fingerprint != self.cache.provider_fingerprint):
+                        self.cache.failures[prompt] = "cloud model identity changed during run"
+                        if not terminal_error:
+                            error = ("cloud reader request failed (cloud model identity changed "
+                                     "during run); response and credentials withheld")
+                            terminal_error = True
+                    else:
+                        self.cache.provider_observed = True
+                        self.cache.provider_model = result.model
+                        self.cache.provider_fingerprint = result.fingerprint
+                        self.cache.put(prompt, result.text)
+                        self.generated += 1
+                        if result.usage is not None:
+                            self.usage.append(result.usage)
+                if completed:
                     self.flush()
+            if error is not None:
                 raise RuntimeError(error)
-            self.cache.put(prompt, text)
-            self.generated += 1
-            self.flush()
+            if cap_reached:
+                raise RuntimeError("cloud request cap reached; cache contains only completed prompts")
         return self.cache.get(prompts)
 
     def flush(self) -> None:
@@ -686,12 +796,17 @@ def stage_states(reader: CloudReader, docs: Mapping[str, Mapping], rows: Sequenc
 
 
 def build_identity(*, corpus_path: Path = CORPUS_PATH,
-                   rankings_path: Path = DEFAULT_RANKINGS) -> CacheIdentity:
+                   rankings_path: Path = DEFAULT_RANKINGS,
+                   provider: str = "aibox") -> CacheIdentity:
     """Bind cloud generation to the provider, message contract and visible-data artifacts."""
     if not Path(rankings_path).exists():
         raise FileNotFoundError(f"rankings artifact required to bind the cache identity: "
                                 f"{rankings_path}")
-    return CacheIdentity(model=MODEL, model_revision=MODEL_REVISION, base_url=BASE_URL,
+    if provider not in ("aibox", "opencode-go"):
+        raise ValueError(f"unknown cloud provider: {provider}")
+    model, base_url = ((GO_MODEL, GO_BASE_URL) if provider == "opencode-go"
+                       else (MODEL, BASE_URL))
+    return CacheIdentity(model=model, model_revision=MODEL_REVISION, base_url=base_url,
                          prompt_version=PROMPT_VERSION, decoding="temperature=0",
                          max_new_tokens=MAX_NEW_TOKENS,
                          corpus_sha256=sha256_file(corpus_path),
@@ -721,18 +836,21 @@ def main() -> None:
     # The ranking fingerprint is recorded for every run (gold included) so one cache file cannot
     # be reused under a different retrieval artifact.
     identity = build_identity(rankings_path=args.rankings)
-    reader = CloudReader(args.cache or (args.out / DEFAULT_CACHE_NAME), identity=identity,
-                         max_requests=args.max_requests)
+    from src.utils.runs import OutputNamespaceLock
+
+    cache_path = args.cache or (args.out / DEFAULT_CACHE_NAME)
     started = time.time()
-    if args.stage == "gold":
-        result = stage_gold(reader, docs, rows, out=args.out)
-    else:
-        result = stage_states(
-            reader, docs, rows, out=args.out, rankings_path=args.rankings,
-            bootstrap_passages=args.bootstrap_passages,
-            passage_per_search_action=args.passage_per_search_action,
-            max_optional_search=args.max_optional_search, tag=tag)
-    reader.flush()
+    with OutputNamespaceLock(cache_path.with_name(cache_path.name + ".lock")):
+        reader = CloudReader(cache_path, identity=identity, max_requests=args.max_requests)
+        if args.stage == "gold":
+            result = stage_gold(reader, docs, rows, out=args.out)
+        else:
+            result = stage_states(
+                reader, docs, rows, out=args.out, rankings_path=args.rankings,
+                bootstrap_passages=args.bootstrap_passages,
+                passage_per_search_action=args.passage_per_search_action,
+                max_optional_search=args.max_optional_search, tag=tag)
+        reader.flush()
     result["generated_this_run"] = reader.generated
     result["requests_this_run"] = reader.requests
     result["usage"] = reader.usage

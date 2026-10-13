@@ -190,7 +190,7 @@ class VixStoryReinforceTrainer(ReinforceTrainer):
                  train_qids: Sequence[str], prior_ref: str | None = None,
                  device: str = "cpu", run_dir: str | Path | None = None,
                  seed: int | None = None, dev_qids: Sequence[str] | None = None,
-                 fixed_updates: bool = False) -> None:
+                 fixed_updates: bool = False, train_monitor: bool = False) -> None:
         if arm not in VIXSTORY_ARMS:
             raise ValueError(f"unknown VixSTORY arm {arm!r}; known: {list(VIXSTORY_ARMS)}")
         super().__init__(train_env, dev_env, config, laya_fn=laya_fn, device=device,
@@ -202,6 +202,7 @@ class VixStoryReinforceTrainer(ReinforceTrainer):
         self.train_qids = tuple(train_qids)
         self.start_update = 1
         self.fixed_updates = fixed_updates
+        self.train_monitor = train_monitor
 
     # -- resume --------------------------------------------------------------
     def _read_history(self, ckpt: Path) -> list[dict]:
@@ -242,7 +243,7 @@ class VixStoryReinforceTrainer(ReinforceTrainer):
     def _restore_best(self) -> tuple[float, int]:
         best_val, best_update = float("-inf"), 0
         for row in self.history:
-            val = row.get("val")
+            val = row.get("train_monitor" if self.train_monitor else "val")
             if val is not None and float(val["mean_reward"]) > best_val:
                 best_val = float(val["mean_reward"])
                 best_update = int(row["update"])
@@ -295,7 +296,7 @@ class VixStoryReinforceTrainer(ReinforceTrainer):
                               "device": self.device}
                 val = evaluate(self.val_env, self.net, self.extractor, self.scaler_t,
                                self.laya_fn, **kwargs)
-                row["val"] = val
+                row["train_monitor" if self.train_monitor else "val"] = val
                 if val["mean_reward"] > best_val + 1e-6:
                     best_val, best_update, patience = val["mean_reward"], update, 0
                     if self.run_dir:
@@ -331,6 +332,7 @@ class VixStoryReinforceTrainer(ReinforceTrainer):
             "experiment": ARM_EXPERIMENT[self.arm],
             "seed": int(self.seed),
             "fixed_updates": self.fixed_updates,
+            "evaluation_scope": "train_monitor" if self.train_monitor else "dev",
             "identity": self.identity,
             "prior_ref": self.prior_ref,
             "train_qids": list(self.train_qids),
@@ -342,13 +344,18 @@ class VixStoryReinforceTrainer(ReinforceTrainer):
         })
 
 
-def _validate_qids(train_qids: Sequence[str], dev_qids: Sequence[str]) -> None:
+def _validate_qids(train_qids: Sequence[str], dev_qids: Sequence[str], *,
+                   train_monitor: bool = False) -> None:
     if not train_qids or not dev_qids:
         raise ValueError("train_qids and dev_qids must both be non-empty")
     for label, qids in (("train_qids", train_qids), ("dev_qids", dev_qids)):
         if len(set(qids)) != len(qids):
             raise ValueError(f"{label} contains duplicates")
     overlap = set(train_qids) & set(dev_qids)
+    if train_monitor:
+        if not set(dev_qids) <= set(train_qids):
+            raise ValueError("train monitor QIDs must be a subset of official training QIDs")
+        return
     if overlap:
         raise ValueError(
             f"train and dev qids must be disjoint; {len(overlap)} shared, e.g. {sorted(overlap)[0]!r}")
@@ -384,13 +391,16 @@ def train_vixstory_policy(train_env: Any, dev_env: Any, config: RLConfig, *,
                           prior_refs: Mapping[str, str] | None = None,
                           resume: bool = False, device: str = "cpu",
                           fixed_updates: bool = False,
+                          train_monitor: bool = False,
                           ) -> dict[str, VixStoryArmResult]:
     """Train the two isolated VixSTORY REINFORCE arms under ``run_root``.
 
     ``priors`` supplies the frozen Laya prior callable per arm (``"rlcd"`` for E06,
     ``"ce"`` for E07), each returning a ``Sequence[4]`` of action probabilities. Only
-    ``train_env`` (train300) and ``dev_env`` (dev200) are ever touched; the official
-    validation split is not an input here and is never read.
+    ``train_env`` (train300) and ``dev_env`` (dev200) are ever touched by default.
+    ``train_monitor=True`` uses the same official-train environment for both, with
+    monitor QIDs a subset of training QIDs; monitor reward is explicitly in-sample.
+    The official validation split is not an input here and is never read.
 
     Each arm gets its own checkpoint directory ``<run_root>/E06_rl_rlcd`` / ``E07_rl_ce`` and
     its own seed, and an identity derived from the actual frozen extractor/env/prior
@@ -402,9 +412,13 @@ def train_vixstory_policy(train_env: Any, dev_env: Any, config: RLConfig, *,
     if set(priors) != set(VIXSTORY_ARMS):
         raise ValueError(f"priors must provide exactly {sorted(VIXSTORY_ARMS)}; got {sorted(priors)}")
     train_qids, dev_qids = tuple(train_qids), tuple(dev_qids)
-    _validate_qids(train_qids, dev_qids)
+    _validate_qids(train_qids, dev_qids, train_monitor=train_monitor)
     _validate_env(train_env, train_qids, "train")
-    _validate_env(dev_env, dev_qids, "dev")
+    if train_monitor:
+        if dev_env is not train_env:
+            raise ValueError("train monitor must use the same train-only environment")
+    else:
+        _validate_env(dev_env, dev_qids, "dev")
 
     extractor_fp = _extractor_fingerprint()
     train_env_fp = _env_fingerprint(train_env)
@@ -420,7 +434,8 @@ def train_vixstory_policy(train_env: Any, dev_env: Any, config: RLConfig, *,
             arm=arm, seed=seed, config=config, train_qids=train_qids, dev_qids=dev_qids,
             extractor_fp=extractor_fp, train_env_fp=train_env_fp, dev_env_fp=dev_env_fp,
             prior_fp=prior_fp, prior_ref=prior_ref)
-        identity = sha256_json({"arm_identity": identity, "fixed_updates": fixed_updates})
+        identity = sha256_json({"arm_identity": identity, "fixed_updates": fixed_updates,
+                                "train_monitor": train_monitor})
         ckpt = run_root / f"{ARM_EXPERIMENT[arm]}_rl_{arm}"
         if ckpt.exists() and not resume:
             raise FileExistsError(
@@ -435,7 +450,7 @@ def train_vixstory_policy(train_env: Any, dev_env: Any, config: RLConfig, *,
             train_env, dev_env, config, arm=entry["arm"], identity=entry["identity"],
             laya_fn=priors[entry["arm"]], prior_ref=entry["prior_ref"], train_qids=train_qids,
             device=device, run_dir=entry["ckpt"], seed=entry["seed"], dev_qids=dev_qids,
-            fixed_updates=fixed_updates)
+            fixed_updates=fixed_updates, train_monitor=train_monitor)
         status = "TRAINED"
         if entry["ckpt"].exists():
             trainer.resume_from(entry["ckpt"], identity=entry["identity"])

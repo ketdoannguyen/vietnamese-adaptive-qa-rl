@@ -2,6 +2,7 @@
 
 import json
 import sys
+import threading
 
 import pytest
 
@@ -247,6 +248,36 @@ def test_cloud_reader_sends_only_prompt_and_observes_request_cap(tmp_path, monke
     assert "synthetic-secret" not in (tmp_path / "cloud.json").read_text()
 
 
+def test_opencode_go_reader_uses_isolated_identity_and_secret(tmp_path, monkeypatch):
+    import httpx
+    from scripts.vixstory_reader_eval import GO_BASE_URL, GO_MODEL, GO_KEY_ENV
+
+    monkeypatch.delenv("AIBOX_API_KEY", raising=False)
+    monkeypatch.setenv(GO_KEY_ENV, "synthetic-go-secret")
+    identity = _identity()
+    from dataclasses import replace
+
+    identity = replace(identity, model=GO_MODEL, base_url=GO_BASE_URL)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"model": GO_MODEL, "choices": [{"message": {
+            "content": '{"answer":"ok","citations":["a"]}'}, "finish_reason": "stop"}]})
+
+    path = tmp_path / "go-cache.json"
+    reader = CloudReader(path, identity=identity, max_requests=1,
+                         client=httpx.Client(transport=httpx.MockTransport(respond)))
+    assert reader.generate(["question with visible passage"]) == [
+        '{"answer":"ok","citations":["a"]}']
+    assert str(requests[0].url) == f"{GO_BASE_URL}/chat/completions"
+    assert json.loads(requests[0].content)["model"] == GO_MODEL
+    assert requests[0].headers["Authorization"] == "Bearer synthetic-go-secret"
+    assert "synthetic-go-secret" not in path.read_text()
+    with pytest.raises(ValueError, match="different reader identity"):
+        GenerationCache(path, _identity())
+
+
 def test_cloud_reader_requires_env_and_redacts_provider_errors(tmp_path, monkeypatch):
     import httpx
 
@@ -264,6 +295,194 @@ def test_cloud_reader_requires_env_and_redacts_provider_errors(tmp_path, monkeyp
     assert "synthetic-secret" not in str(exc.value)
     assert exc.value.__context__ is None
     assert reader.requests == 1 and reader.cache.attempts == 1 and len(reader.cache) == 0
+
+
+def test_cloud_reader_does_not_retry_output_budget_exhaustion(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("AIBOX_API_KEY", "synthetic-secret")
+    attempts = []
+
+    def respond(_request):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""},
+                                                          "finish_reason": "length"}]})
+        return httpx.Response(200, json={"model": MODEL, "choices": [{"message": {
+            "content": '{"answer":"ok","citations":["a"]}'}, "finish_reason": "stop"}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    reader = CloudReader(tmp_path / "cache.json", identity=_identity(), max_requests=2,
+                         client=client)
+    with pytest.raises(RuntimeError, match="exhausted output budget"):
+        reader.generate(["p"])
+    assert reader.cache.attempts == 1
+    assert reader.cache.retries["p"] == 1
+    assert len(GenerationCache(tmp_path / "cache.json", _identity())) == 0
+
+
+def test_cloud_reader_retry_limit_survives_resume(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("AIBOX_API_KEY", "synthetic-secret")
+    attempts = []
+
+    def respond(_request):
+        attempts.append(1)
+        return httpx.Response(429, text="synthetic-secret")
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    path = tmp_path / "cache.json"
+    reader = CloudReader(path, identity=_identity(), max_requests=5, client=client)
+    with pytest.raises(RuntimeError, match="HTTP 429") as exc:
+        reader.generate(["p"])
+    assert "synthetic-secret" not in str(exc.value)
+    assert len(attempts) == 5
+    resumed = CloudReader(path, identity=_identity(), max_requests=5, client=client)
+    with pytest.raises(RuntimeError, match="retry limit"):
+        resumed.generate(["p"])
+    assert len(attempts) == 5
+    assert resumed.cache.attempts == 5
+
+
+def test_cloud_reader_does_not_retry_authorization_failure(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("AIBOX_API_KEY", "synthetic-secret")
+    calls = []
+
+    def respond(_request):
+        calls.append(1)
+        return httpx.Response(401, text="synthetic-secret")
+
+    reader = CloudReader(tmp_path / "cache.json", identity=_identity(), max_requests=5,
+                         client=httpx.Client(transport=httpx.MockTransport(respond)))
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        reader.generate(["p"])
+    assert len(calls) == reader.cache.attempts == 1
+
+
+def _seed_provider_identity(path):
+    cache = GenerationCache(path, _identity())
+    cache.provider_observed = True
+    cache.provider_model = MODEL
+    cache.flush()
+
+
+def test_cloud_reader_runs_ten_requests_concurrently_with_single_writer(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("AIBOX_API_KEY", "synthetic-secret")
+    barrier = threading.Barrier(10)
+    requested = []
+    request_lock = threading.Lock()
+    main_thread = threading.get_ident()
+    path = tmp_path / "cache.json"
+
+    def respond(request):
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        with request_lock:
+            requested.append(prompt)
+        persisted = json.loads(path.read_text())
+        assert persisted["attempts"] == 10
+        assert all(persisted["retries"].get(f"p{i}") == 1 for i in range(10))
+        barrier.wait(timeout=10)
+        return httpx.Response(200, json={"model": MODEL, "choices": [{"message": {
+            "content": '{"answer":"ok","citations":["a"]}'}, "finish_reason": "stop"}]})
+
+    _seed_provider_identity(path)
+    reader = CloudReader(path, identity=_identity(), max_requests=10,
+                         client=httpx.Client(transport=httpx.MockTransport(respond)))
+    flush = reader.flush
+    writes = []
+
+    def tracked_flush():
+        writes.append(threading.get_ident())
+        flush()
+
+    reader.flush = tracked_flush
+    result = reader.generate([f"p{i}" for i in range(10)] + ["p0"], workers=10)
+    assert len(result) == 11 and len(requested) == len(set(requested)) == 10
+    assert reader.cache.attempts == 10 and reader.generated == 10
+    assert set(writes) == {main_thread}
+    with pytest.raises(RuntimeError, match="cap"):
+        reader.generate(["more"], workers=10)
+    assert len(GenerationCache(path, _identity())) == 10
+
+
+def test_cloud_reader_parallel_retry_and_inflight_drain(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("AIBOX_API_KEY", "synthetic-secret")
+    attempts = {}
+    barrier = threading.Barrier(2)
+
+    def respond(request):
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        attempts[prompt] = attempts.get(prompt, 0) + 1
+        if attempts[prompt] == 1:
+            barrier.wait(timeout=10)
+        if prompt == "retry" and attempts[prompt] == 1:
+            return httpx.Response(429)
+        return httpx.Response(200, json={"model": MODEL, "choices": [{"message": {
+            "content": '{"answer":"ok","citations":["a"]}'}, "finish_reason": "stop"}]})
+
+    path = tmp_path / "cache.json"
+    _seed_provider_identity(path)
+    reader = CloudReader(path, identity=_identity(), max_requests=3,
+                         client=httpx.Client(transport=httpx.MockTransport(respond)))
+    assert len(reader.generate(["retry", "other"], workers=2)) == 2
+    assert attempts == {"retry": 2, "other": 1}
+    assert reader.cache.attempts == 3 and len(GenerationCache(path, _identity())) == 2
+
+
+def test_cloud_reader_parallel_model_drift_records_failure(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("AIBOX_API_KEY", "synthetic-secret")
+    barrier = threading.Barrier(2)
+
+    def respond(request):
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        barrier.wait(timeout=10)
+        model = "changed-model" if prompt == "drift" else MODEL
+        return httpx.Response(200, json={"model": model, "choices": [{"message": {
+            "content": '{"answer":"ok","citations":["a"]}'}, "finish_reason": "stop"}]})
+
+    path = tmp_path / "cache.json"
+    _seed_provider_identity(path)
+    reader = CloudReader(path, identity=_identity(), max_requests=2,
+                         client=httpx.Client(transport=httpx.MockTransport(respond)))
+    with pytest.raises(RuntimeError, match="identity changed"):
+        reader.generate(["stable", "drift"], workers=2)
+    reloaded = GenerationCache(path, _identity())
+    assert reloaded.failures and reloaded.attempts == 2
+    assert len(reloaded) == 1
+
+
+def test_cloud_reader_parallel_failure_keeps_inflight_success(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("AIBOX_API_KEY", "synthetic-secret")
+    barrier = threading.Barrier(2)
+
+    def respond(request):
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        barrier.wait(timeout=10)
+        if prompt == "bad":
+            return httpx.Response(401)
+        return httpx.Response(200, json={"model": MODEL, "choices": [{"message": {
+            "content": '{"answer":"ok","citations":["a"]}'}, "finish_reason": "stop"}]})
+
+    path = tmp_path / "cache.json"
+    _seed_provider_identity(path)
+    reader = CloudReader(path, identity=_identity(), max_requests=2,
+                         client=httpx.Client(transport=httpx.MockTransport(respond)))
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        reader.generate(["bad", "good", "unsent"], workers=2)
+    reloaded = GenerationCache(path, _identity())
+    assert "good" in reloaded and "bad" not in reloaded and "unsent" not in reloaded
+    assert reloaded.attempts == 2
 
 
 def test_cache_refuses_legacy_prompt_only_json(tmp_path):

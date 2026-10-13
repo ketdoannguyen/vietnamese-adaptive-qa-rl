@@ -336,6 +336,25 @@ def test_trains_two_isolated_arms(tmp_path):
         PolicyNet.load(ckpt / "policy.safetensors")
 
 
+def test_train_monitor_uses_train_only_and_never_calls_it_val(tmp_path):
+    env = train_env()
+    result = train_vixstory_policy(
+        env, env, tiny_config(max_updates=2, eval_every=1),
+        priors={"rlcd": make_prior(1.0), "ce": make_prior(0.4)},
+        run_root=tmp_path, train_qids=TRAIN_QIDS, dev_qids=TRAIN_QIDS[:1],
+        train_monitor=True, fixed_updates=True, device="cpu")
+    for arm, value in result.items():
+        history = json.loads((tmp_path / f"{value.experiment}_rl_{arm}" / "history.json").read_text())
+        summary = json.loads((tmp_path / f"{value.experiment}_rl_{arm}" / "summary.json").read_text())
+        assert summary["evaluation_scope"] == "train_monitor"
+        assert all("train_monitor" in entry and "val" not in entry for entry in history)
+    with pytest.raises(ValueError, match="subset"):
+        train_vixstory_policy(env, env, tiny_config(),
+                             priors={"rlcd": make_prior(1.0), "ce": make_prior(0.4)},
+                             run_root=tmp_path / "bad", train_qids=TRAIN_QIDS,
+                             dev_qids=DEV_QIDS, train_monitor=True)
+
+
 def test_explicit_matched_seeds_run_all_updates_for_both_arms(tmp_path):
     config = tiny_config(max_updates=3, early_stop_patience=1)
     result = train_once(tmp_path, config=config, arm_seeds={"rlcd": 42, "ce": 42},

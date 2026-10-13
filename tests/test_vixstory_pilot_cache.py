@@ -1,8 +1,8 @@
 """VixSTORY pilot reader-cache warm-up contracts (CPU/synthetic, no model load, no GPU).
 
-The warm-up pass must cover every reachable ordered retrieval state of every pilot QID, must
-fail fast — never drop a state — on an over-budget prompt or a missing input, must persist
-incrementally so a long run resumes, and must bind the cache to the reader identity. Every
+The warm-up pass plans every reachable ordered retrieval state, fails fast on invalid inputs,
+reports cloud failures as incomplete coverage, persists incrementally so a long run resumes,
+and binds the cache to the reader identity. Every
 test injects a deterministic fake reader and reads from synthetic in-memory fixtures; the real
 model is never loaded and the official test split is never touched.
 """
@@ -78,7 +78,7 @@ class FakeReader:
         self.generated = 0
         self.flushes = 0
 
-    def generate(self, prompts):
+    def generate(self, prompts, *, workers=1):
         for prompt in dict.fromkeys(prompts):
             if any(marker in prompt for marker in self.boom):
                 raise RuntimeError("boom")
@@ -230,6 +230,68 @@ def test_a_crash_mid_run_keeps_the_flushed_batches(tmp_path):
     assert len(GenerationCache(cache_path, _identity())) == 2
 
 
+def test_exhausted_prompt_is_skipped_while_other_roles_continue(tmp_path):
+    cache_path, reader = _reader(tmp_path)
+    failed = state_prompts(qids=["q1"], questions={"q1": _toy_questions()["q1"]},
+                           rankings={"q1": RANKINGS}, corpus=CORPUS, budget=BUDGET)[0].prompt
+    reader.cache.retries[failed] = 5
+    reader.flush()
+    coverage = run(stages=("train", "dev"), manifest=_toy_manifest(), corpus=CORPUS,
+                   rankings={"q1": RANKINGS, "q2": RANKINGS},
+                   train_questions=_toy_questions(), validation_questions={}, reader=reader,
+                   budget=BUDGET, out_dir=tmp_path, inputs=_toy_inputs(), batch_size=2)
+    assert coverage["all_states_verified"] is False
+    assert coverage["splits"]["train"]["n_missing_prompts"] == 1
+    assert coverage["splits"]["train"]["n_failed_prompts"] == 1
+    assert coverage["splits"]["train"]["n_missing_states"] == 1
+    assert coverage["splits"]["dev"]["states_verified"] is True
+    assert coverage["totals"]["n_missing_states"] == 1
+    assert reader.generated == 2 * N_STATES - 1
+    assert reader.cache.retries[failed] == 5 and failed not in reader.cache
+    assert len(GenerationCache(cache_path, _identity())) == 2 * N_STATES - 1
+
+
+class OneFailedPromptReader(FakeReader):
+    def __init__(self, cache, failed):
+        super().__init__(cache)
+        self.failed = failed
+
+    def generate(self, prompts, *, workers=1):
+        if self.failed in prompts:
+            self.cache.retries[self.failed] = 5
+            self.flush()
+            raise RuntimeError("cloud reader request failed (transport error); response and credentials withheld")
+        return super().generate(prompts, workers=workers)
+
+
+def test_failed_request_does_not_stop_later_prompts_in_batch(tmp_path):
+    cache_path, fake = _reader(tmp_path)
+    first = state_prompts(qids=["q1"], questions={"q1": QUESTION},
+                          rankings={"q1": RANKINGS}, corpus=CORPUS, budget=BUDGET)[0].prompt
+    reader = OneFailedPromptReader(fake.cache, first)
+    result = warm_stage(role="train", qids=["q1"], questions={"q1": QUESTION},
+                        corpus=CORPUS, rankings={"q1": RANKINGS}, reader=reader,
+                        budget=BUDGET, batch_size=N_STATES)
+    assert result["n_missing_states"] == 1 and reader.generated == N_STATES - 1
+    assert len(GenerationCache(cache_path, _identity())) == N_STATES - 1
+
+
+def test_terminal_identity_failure_stops_warm_up(tmp_path):
+    _path, fake = _reader(tmp_path)
+    first = state_prompts(qids=["q1"], questions={"q1": QUESTION},
+                          rankings={"q1": RANKINGS}, corpus=CORPUS, budget=BUDGET)[0].prompt
+    reader = OneFailedPromptReader(fake.cache, first)
+    def fail_identity(prompts, *, workers=1):
+        reader.cache.failures[first] = "cloud model identity changed during run"
+        reader.flush()
+        raise RuntimeError("cloud reader request failed (cloud model identity changed during run); response and credentials withheld")
+    reader.generate = fail_identity
+    with pytest.raises(RuntimeError, match="identity changed"):
+        warm_stage(role="train", qids=["q1"], questions={"q1": QUESTION},
+                   corpus=CORPUS, rankings={"q1": RANKINGS}, reader=reader,
+                   budget=BUDGET)
+
+
 def test_cache_is_bound_to_the_reader_identity(tmp_path):
     cache_path = tmp_path / "reader-cache-pilot.json"
     cache = GenerationCache(cache_path, _identity())
@@ -263,6 +325,7 @@ def test_run_writes_coverage_with_counts_hashes_and_verification(tmp_path):
                    reader=reader, budget=BUDGET, out_dir=tmp_path, inputs=_toy_inputs())
     assert coverage["all_states_verified"] is True
     assert coverage["totals"] == {"n_qids": 3, "n_states": 3 * N_STATES,
+                                  "n_missing_states": 0,
                                   "generated_this_run": 3 * N_STATES}
     assert coverage["inputs"]["official_test_loaded"] is False
     assert set(coverage["splits"]) == {"train", "dev", "validation"}
@@ -402,6 +465,18 @@ def test_cli_opens_and_hashes_only_requested_qa_sources(tmp_path, monkeypatch, s
     coverage = json.loads((tmp_path / COVERAGE_NAME).read_text())
     assert ("validation" in coverage["inputs"]) == (validation_path in expected)
     assert ("train" in coverage["inputs"]) == (train_path in expected)
+
+
+def test_cache_lock_refuses_another_writer(tmp_path):
+    from src.utils.runs import LockHeld, OutputNamespaceLock
+
+    lock_path = tmp_path / "cache.json.lock"
+    with OutputNamespaceLock(lock_path):
+        with pytest.raises(LockHeld):
+            with OutputNamespaceLock(lock_path):
+                pytest.fail("second writer entered")
+    with OutputNamespaceLock(lock_path):
+        pass
 
 
 def test_state_prompt_is_a_frozen_value():

@@ -67,11 +67,13 @@ def collect_teacher_inputs(bundle, config: VixStoryEnvConfig) -> dict:
 
 
 def write_teacher(bundle, config: VixStoryEnvConfig, path: Path, *, tokenizer,
-                  max_len: int = 768, head_max_len: int = 192) -> dict:
+                  max_len: int = 768, head_max_len: int = 192,
+                  expected_role: str = "train", expected_qids: int | None = None) -> dict:
     from src.pipeline.vixstory_teacher import teacher_rows
 
-    if bundle.role != "train":
-        raise ValueError("teacher must only use the train300 split")
+    if bundle.role != expected_role or (expected_qids is not None and
+                                        len(bundle.qids) != expected_qids):
+        raise ValueError(f"teacher requires {expected_role} role and {expected_qids} QIDs")
     if path.exists():
         raise FileExistsError(f"refusing to overwrite teacher artifact: {path}")
     from src.decision import vixstory_state_text

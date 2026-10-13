@@ -222,7 +222,8 @@ def run(*, data: str | Path, base: str, pilot_manifest: str | Path, out_root: st
         seed: int | None = None, device: str | None = None, allow_download: bool = False,
         dry_run: bool = False, profile: str | None = None, cfg: Mapping[str, Any] | None = None,
         train_module: Any | None = None,
-        teacher_provenance: str | Path | None = None) -> dict[str, Any]:
+        teacher_provenance: str | Path | None = None,
+        full_train: bool = False) -> dict[str, Any]:
     """Train the requested pilot arm(s) on the TRAIN300-only teacher file.
 
     Returns ``{arm: {out_dir, manifest, model_hash, dry_run, epochs, seed, device}}``.
@@ -240,10 +241,24 @@ def run(*, data: str | Path, base: str, pilot_manifest: str | Path, out_root: st
             f"pilot manifest not found: {pilot_manifest_path}; pass --pilot-manifest")
     out_root = Path(out_root)
 
-    pilot_qids, validation_qids = pilot_split_qids(pilot_manifest_path)
     rows = read_teacher_rows(data_path)
-    guard = guard_teacher_scope({str(row["meta"]["qid"]) for row in rows}, pilot_qids,
-                                validation_qids)
+    row_qids = {str(row["meta"]["qid"]) for row in rows}
+    if full_train:
+        from scripts.vixstory_pilot_manifest import TRAIN_COUNT
+
+        manifest = read_json(pilot_manifest_path)
+        pilot_qids = set(manifest["qids"])
+        validation_qids = set()
+        if (manifest.get("artifact") != "vixstory_full_official_train"
+                or manifest.get("n_qids") != TRAIN_COUNT
+                or len(pilot_qids) != TRAIN_COUNT
+                or sha256_json(sorted(pilot_qids)) != manifest.get("qids_sha256")
+                or row_qids != pilot_qids):
+            raise ValueError("full-train teacher must cover exactly the official train QIDs")
+        guard = {"validation_rows_in_train": 0, "qids_outside_pilot": 0}
+    else:
+        pilot_qids, validation_qids = pilot_split_qids(pilot_manifest_path)
+        guard = guard_teacher_scope(row_qids, pilot_qids, validation_qids)
     data_sha = sha256_file(data_path)
     teacher_contract = None
     if teacher_provenance is None and train_module is None:

@@ -23,12 +23,9 @@ reader prompts      built with ``scripts.vixstory_reader_eval.reader_prompt`` ov
 
 Four rules this script exists to enforce:
 
-* **No skipped QIDs, no dropped state.** The pilot needs every state of every manifest
-  QID. A missing ranking, a ranking too short for the deepest state, a question row absent
-  from its split, or a state prompt over ``MAX_PROMPT_CHARS`` raises before any generation.
-  A token-window check runs only if the reader exposes a tokenizer and context size.
-  Shortening evidence (deterministic truncation) is deliberately
-  *not* implemented: evaluating a shortened passage is a different measurement.
+* **No silently dropped states.** Missing rankings, question rows, or over-budget prompts
+  raise before generation. Individual exhausted cloud prompts remain absent and are reported
+  as incomplete coverage; locked world assembly rejects their QIDs. Evidence is never shortened.
 * **Use the validated cloud cache identity.** ``build_identity`` binds the reader,
   prompt contract, corpus and rankings; ``GenerationCache`` rejects a different identity.
   No additional fingerprint is invented here.
@@ -55,6 +52,7 @@ from typing import Callable, Mapping, Sequence
 from scripts.vixstory_reader_eval import (
     CACHE_VERSION,
     CORPUS_PATH,
+    MAX_ATTEMPTS_PER_PROMPT,
     PILOT_MAX_PROMPT_CHARS,
     SNAP,
     CloudReader,
@@ -65,6 +63,7 @@ from scripts.vixstory_reader_eval import (
 from src.retrieval.states import reachable_states
 from src.utils.hashing import sha256_file, sha256_json
 from src.utils.io import atomic_write_json, read_json
+from src.utils.runs import OutputNamespaceLock
 
 # --- pilot namespace (new outputs only) -----------------------------------
 RUN_ID = "vixstory-cloud-pilot-300-2026-10-11"
@@ -74,7 +73,7 @@ MANIFEST_PATH = SOURCE_DIR / "manifest.json"
 RANKINGS_PATH = SOURCE_DIR / "pilot_rankings_top12.json"
 #: Versioned reader cache for the pilot. It is disjoint from reader-eval's ``reader-cache-v2.json``
 #: so a warm-up pass never rewrites another run's generations.
-CACHE_NAME = "reader-cache-cloud-v2.json"
+CACHE_NAME = "reader-cache-cloud-v3-max16384.json"
 #: Coverable split roles -> their frozen-manifest record names.
 MANIFEST_SPLITS = {"train": "pilot_300", "dev": "train_dev_200", "validation": "validation_246"}
 STAGES = tuple(MANIFEST_SPLITS)
@@ -307,40 +306,63 @@ def assert_within_budget(state_prompts: Sequence[StatePrompt], *,
 # --- generation (reader-backed, persisted incrementally) --------------------
 
 def warm_prompts(reader: object, prompts: Sequence[str], *, batch_size: int = DEFAULT_BATCH_SIZE,
-                 progress: Callable[[int, int], None] | None = None) -> dict:
-    """Generate every prompt missing from the reader cache, flushing after each batch.
+                 workers: int = 1, progress: Callable[[int, int], None] | None = None) -> dict:
+    """Try missing prompts, skipping only recorded/exhausted failures.
 
-    The cache is the durable artifact: flushing after every batch means an interrupted run is
-    resumed by simply re-running (already-cached prompts are never regenerated). Returns the
-    unique/cached/generated counts; a prompt still absent afterwards is a hard error.
+    Successful answers and actual attempts remain in the identity-bound cache. A failed prompt
+    is never replaced with a dummy answer; the caller reports incomplete coverage.
     """
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     unique = list(dict.fromkeys(prompts))
+    before = len(reader.cache)
     missing = [p for p in unique if p not in reader.cache]
+    skippable = {"cloud response exhausted output budget"}
+    for prompt, failure in reader.cache.failures.items():
+        if failure not in skippable:
+            raise RuntimeError(f"cloud cache contains terminal failure ({failure}); stopping")
     for start in range(0, len(missing), batch_size):
         batch = missing[start:start + batch_size]
-        reader.generate(batch)
-        reader.flush()
+        while True:
+            eligible = [p for p in batch if p not in reader.cache and
+                        p not in reader.cache.failures and
+                        reader.cache.retries.get(p, 0) < MAX_ATTEMPTS_PER_PROMPT]
+            if not eligible:
+                break
+            try:
+                reader.generate(eligible, workers=workers)
+            except RuntimeError as exc:
+                blocked = [p for p in eligible if p not in reader.cache and
+                           (p in reader.cache.failures or
+                            reader.cache.retries.get(p, 0) >= MAX_ATTEMPTS_PER_PROMPT)]
+                if not blocked or not str(exc).startswith("cloud reader request failed ("):
+                    raise
+                if any(reader.cache.failures.get(p) not in (None, *skippable)
+                       for p in blocked):
+                    raise
+            reader.flush()
         if progress is not None:
             progress(min(start + len(batch), len(missing)), len(missing))
     absent = [p for p in unique if p not in reader.cache]
-    if absent:
-        raise RuntimeError(f"{len(absent)} prompt(s) are still absent from {reader.cache.path} "
-                           "after generation; refusing to report a partial warm-up as complete")
-    return {"n_unique": len(unique), "n_generated": len(missing)}
+    blocked = [p for p in absent if p in reader.cache.failures or
+               reader.cache.retries.get(p, 0) >= MAX_ATTEMPTS_PER_PROMPT]
+    if len(blocked) != len(absent):
+        raise RuntimeError("cache warm-up left prompts missing without a recorded failure or "
+                           "exhausted attempt budget")
+    return {"n_unique": len(unique), "n_generated": len(reader.cache) - before,
+            "n_missing": len(absent), "n_failed": len(blocked)}
 
 
 def warm_stage(*, role: str, qids: Sequence[str], questions: Mapping[str, str],
                corpus: Mapping[str, str], rankings: Mapping[str, Mapping[str, Sequence[str]]],
                reader: object, budget: EpisodeBudget,
                max_prompt_chars: int = PILOT_MAX_PROMPT_CHARS,
-               batch_size: int = DEFAULT_BATCH_SIZE,
+               batch_size: int = DEFAULT_BATCH_SIZE, workers: int = 1,
                progress: Callable[[int, int], None] | None = None) -> dict:
     """Warm every reachable state of one pilot role; return its coverage record.
 
     Every manifest QID must have a question row and a deep-enough ranking, and every planned
-    state must be cached afterwards — a missing one raises rather than being skipped.
+    missing generation remains explicitly recorded as incomplete coverage.
     """
     missing_rankings = [qid for qid in qids if qid not in rankings]
     if missing_rankings:
@@ -364,16 +386,14 @@ def warm_stage(*, role: str, qids: Sequence[str], questions: Mapping[str, str],
     assert_within_budget(prompts, max_prompt_chars=max_prompt_chars, reader=reader)
 
     warm = warm_prompts(reader, [sp.prompt for sp in prompts], batch_size=batch_size,
-                        progress=progress)
+                        workers=workers, progress=progress)
     absent = [sp for sp in prompts if sp.prompt not in reader.cache]
-    if absent:
-        raise RuntimeError(f"{role}: {len(absent)} state prompt(s) missing after warm-up, e.g. "
-                           f"qid={absent[0].qid!r} state={list(absent[0].state)}")
-
     per_qid = Counter(sp.qid for sp in prompts)
     states_per_qid = [per_qid[qid] for qid in qids]
     return {"role": role, "n_qids": len(qids), "n_states": len(prompts),
             "n_unique_prompts": warm["n_unique"], "n_generated": warm["n_generated"],
+            "n_missing_prompts": warm["n_missing"], "n_failed_prompts": warm["n_failed"],
+            "n_missing_states": len(absent),
             "qids_sha256": sha256_json(sorted(qids)),
             "states_per_qid_mean": round(sum(states_per_qid) / len(states_per_qid), 2),
             "states_per_qid_max": max(states_per_qid),
@@ -387,8 +407,9 @@ def build_coverage(*, stages: Sequence[str], per_split: Mapping[str, Mapping],
                    max_prompt_chars: int, batch_size: int) -> dict:
     """Assemble the final coverage manifest: counts, hashes and the all-states-verified proof."""
     split_block = {role: {key: per_split[role][key] for key in (
-        "n_qids", "n_states", "n_unique_prompts", "n_generated", "qids_sha256",
-        "states_per_qid_mean", "states_per_qid_max", "states_verified")} for role in stages}
+        "n_qids", "n_states", "n_unique_prompts", "n_generated", "n_missing_prompts",
+        "n_failed_prompts", "n_missing_states", "qids_sha256", "states_per_qid_mean",
+        "states_per_qid_max", "states_verified")} for role in stages}
     return {
         "artifact": COVERAGE_ARTIFACT, "schema_version": SCHEMA_VERSION, "run_id": RUN_ID,
         "stages": list(stages),
@@ -404,6 +425,7 @@ def build_coverage(*, stages: Sequence[str], per_split: Mapping[str, Mapping],
         "splits": split_block,
         "totals": {"n_qids": sum(r["n_qids"] for r in per_split.values()),
                    "n_states": sum(r["n_states"] for r in per_split.values()),
+                   "n_missing_states": sum(r["n_missing_states"] for r in per_split.values()),
                    "generated_this_run": sum(r["n_generated"] for r in per_split.values())},
         "all_states_verified": all(r["states_verified"] for r in per_split.values()),
     }
@@ -414,7 +436,7 @@ def run(*, stages: Sequence[str], manifest: Mapping[str, Sequence[str]],
         train_questions: Mapping[str, str], validation_questions: Mapping[str, str],
         reader: object, budget: EpisodeBudget, out_dir: str | Path,
         inputs: Mapping[str, object], max_prompt_chars: int = PILOT_MAX_PROMPT_CHARS,
-        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_size: int = DEFAULT_BATCH_SIZE, workers: int = 1,
         progress: Callable[[int, int], None] | None = None) -> dict:
     """Warm every requested split, write the coverage manifest, and return it.
 
@@ -432,7 +454,7 @@ def run(*, stages: Sequence[str], manifest: Mapping[str, Sequence[str]],
         per_split[role] = warm_stage(role=role, qids=manifest[role], questions=questions_by_role[role],
                                      corpus=corpus, rankings=rankings, reader=reader, budget=budget,
                                      max_prompt_chars=max_prompt_chars, batch_size=batch_size,
-                                     progress=progress)
+                                     workers=workers, progress=progress)
         reader.flush()  # stage-end flush: the stage's states survive a later-stage crash
 
     coverage = build_coverage(stages=stages, per_split=per_split, budget=budget, reader=reader,
@@ -477,7 +499,9 @@ def main() -> int:
     parser.add_argument("--max-requests", type=int, default=50,
                         help="maximum cumulative cloud attempts in this cache across resumed runs")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                        help="prompts per flush unit; the cache is persisted after each")
+                        help="prompts per progress batch")
+    parser.add_argument("--workers", type=int, default=10,
+                        help="concurrent cloud requests (1-10); one process owns the cache")
     parser.add_argument("--max-prompt-chars", type=int, default=PILOT_MAX_PROMPT_CHARS)
     parser.add_argument("--preflight-only", action="store_true",
                         help="count planned train/dev prompts without API calls or writing a cache")
@@ -491,6 +515,16 @@ def main() -> int:
     pilot_dir = args.pilot_dir
     cache_path = args.cache or (pilot_dir / CACHE_NAME)
     assert_pilot_namespace(cache_path, pilot_dir)  # the warm-up cache is pilot-scoped only
+    if not 1 <= args.workers <= 10:
+        parser.error("--workers must be between 1 and 10")
+    if args.preflight_only:
+        return _warm_cli(args, pilot_dir, cache_path)
+    with OutputNamespaceLock(cache_path.with_name(cache_path.name + ".lock")):
+        with OutputNamespaceLock(pilot_dir / ".reader-cache-warm.lock"):
+            return _warm_cli(args, pilot_dir, cache_path)
+
+
+def _warm_cli(args, pilot_dir: Path, cache_path: Path) -> int:
     manifest_path = args.manifest or MANIFEST_PATH
     rankings_path = args.rankings or RANKINGS_PATH
 
@@ -514,12 +548,14 @@ def main() -> int:
         questions=train_questions if role != "validation" else validation_questions,
         rankings=rankings, corpus=corpus, budget=budget)}
     remaining = sum(prompt not in reader.cache for prompt in planned)
+    eligible = sum(prompt not in reader.cache and prompt not in reader.cache.failures and
+                   reader.cache.retries.get(prompt, 0) < MAX_ATTEMPTS_PER_PROMPT
+                   for prompt in planned)
     attempts = getattr(reader.cache, "attempts", 0)
-    print(f"cloud cache preflight: {len(planned)} unique prompts, {remaining} missing, "
-          f"{attempts}/{args.max_requests} attempts used", flush=True)
-    if attempts + remaining > args.max_requests:
-        raise RuntimeError("cloud cache request cap cannot cover all missing prompts; "
-                           "raise --max-requests before starting")
+    print(f"cloud cache preflight: {len(planned)} unique prompts, {remaining} missing "
+          f"({eligible} eligible), {attempts}/{args.max_requests} attempts used", flush=True)
+    if attempts >= args.max_requests and eligible:
+        raise RuntimeError("cloud cache request cap exhausted; no new attempts allowed")
     if args.preflight_only:
         return 0
     inputs = _pilot_inputs(manifest_path=manifest_path, rankings_path=rankings_path,
@@ -535,7 +571,7 @@ def main() -> int:
                        train_questions=train_questions, validation_questions=validation_questions,
                        reader=reader, budget=budget, out_dir=pilot_dir, inputs=inputs,
                        max_prompt_chars=args.max_prompt_chars, batch_size=args.batch_size,
-                       progress=_progress)
+                       workers=args.workers, progress=_progress)
     except KeyboardInterrupt:
         reader.flush()
         print("interrupted; the generation cache was flushed and will resume on re-run", flush=True)

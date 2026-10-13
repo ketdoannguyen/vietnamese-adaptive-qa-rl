@@ -1,27 +1,37 @@
-"""A failed parquet write must not replace a previously registered artifact."""
+"""Atomic JSON writes preserve the previous artifact if replacement fails."""
 
 from __future__ import annotations
 
-import pyarrow.parquet as pq
+import json
+import os
+
 import pytest
 
-from src.utils.hashing import sha256_file
-from src.utils.io import write_parquet
+from src.utils.io import atomic_write_json
 
 
-def test_failed_parquet_rewrite_preserves_previous_file(tmp_path, monkeypatch):
-    path = tmp_path / "artifact.parquet"
-    old = write_parquet(path, [{"qid": "first"}])
-    original = pq.write_table
+def test_failed_json_rewrite_preserves_previous_file(tmp_path, monkeypatch):
+    path = tmp_path / "artifact.json"
+    atomic_write_json(path, {"qid": "first"})
+    original = path.read_bytes()
 
-    def fail_after_write(table, target, **kwargs):
-        original(table, target, **kwargs)
-        raise RuntimeError("interrupted write")
+    def fail_replace(source, target):
+        raise OSError("interrupted replace")
 
-    monkeypatch.setattr(pq, "write_table", fail_after_write)
-    with pytest.raises(RuntimeError, match="interrupted write"):
-        write_parquet(path, [{"qid": "replacement"}])
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="interrupted replace"):
+        atomic_write_json(path, {"qid": "replacement"})
 
-    assert sha256_file(path) == old["sha256"]
-    assert pq.read_table(path).to_pylist() == [{"qid": "first"}]
+    assert path.read_bytes() == original
     assert list(tmp_path.iterdir()) == [path]
+
+
+def test_json_rewrite_replaces_previous_file(tmp_path):
+    path = tmp_path / "nested" / "artifact.json"
+    atomic_write_json(path, {"qid": "first"})
+    atomic_write_json(path, {"question": "Thủ đô của Việt Nam là gì?"})
+
+    text = path.read_text(encoding="utf-8")
+    assert json.loads(text) == {"question": "Thủ đô của Việt Nam là gì?"}
+    assert "Thủ đô" in text
+    assert list(path.parent.iterdir()) == [path]

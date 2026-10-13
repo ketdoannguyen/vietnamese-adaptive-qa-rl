@@ -25,7 +25,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from src.rl.env import AdaptiveQAEnv
 from src.rl.features import FeatureExtractor, FeatureScaler
 from src.rl.policy import N_ACTIONS, PolicyNet
 from src.utils.io import append_jsonl
@@ -82,7 +81,7 @@ def discounted_returns(rewards: Sequence[float], gamma: float) -> np.ndarray:
     return out
 
 
-def rollout(env: AdaptiveQAEnv, net: PolicyNet, extractor: FeatureExtractor,
+def rollout(env: Any, net: PolicyNet, extractor: FeatureExtractor,
             scaler_t: Any | None, laya_fn: Callable[[dict], Sequence[float]] | None,
             *, seed: int | None = None, qid: str | None = None,
             greedy: bool = False, device: torch.device | None = None) -> Episode:
@@ -161,7 +160,7 @@ def reinforce_loss(episodes: list[Episode], net: PolicyNet, scaler_t: Any | None
     return loss, stats
 
 
-def evaluate(env: AdaptiveQAEnv, net: PolicyNet, extractor: FeatureExtractor,
+def evaluate(env: Any, net: PolicyNet, extractor: FeatureExtractor,
              scaler_t: Any | None, laya_fn, *, episodes: int, device: torch.device,
              seed_base: int = 10_000, qids: Sequence[str] | None = None) -> dict[str, Any]:
     """Deterministic greedy evaluation, optionally over fixed, unique question IDs."""
@@ -185,7 +184,7 @@ def evaluate(env: AdaptiveQAEnv, net: PolicyNet, extractor: FeatureExtractor,
 
 
 class ReinforceTrainer:
-    def __init__(self, train_env: AdaptiveQAEnv, val_env: AdaptiveQAEnv, config: RLConfig,
+    def __init__(self, train_env: Any, val_env: Any, config: RLConfig,
                  *, laya_fn=None, device: str = "cpu", run_dir: str | Path | None = None,
                  seed: int | None = None, val_qids: Sequence[str] | None = None) -> None:
         self.train_env = train_env
@@ -317,17 +316,6 @@ class ReinforceTrainer:
             self.scaler.save(path / "scaler.json")
         (path / "rl_config.json").write_text(
             json.dumps(self.config.__dict__, indent=2), encoding="utf-8")
-
-    def load_best(self, path: str | Path) -> None:
-        path = Path(path)
-        self.net = PolicyNet.load(path / "policy.safetensors").to(self.device)
-        scaler_path = path / "scaler.json"
-        if scaler_path.exists():
-            self.scaler = FeatureScaler.load(scaler_path)
-            from src.rl.policy import TorchScaler
-            self.scaler_t = TorchScaler(np.asarray(self.scaler.mean, dtype=np.float32),
-                                        np.asarray(self.scaler.std, dtype=np.float32),
-                                        self.scaler.clip)
 
 
 def _param_vector(net: nn.Module) -> np.ndarray:

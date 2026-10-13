@@ -1,6 +1,4 @@
-# Profile overlay: uncapped strict splits (train ~19.9k / val ~4.3k / test ~4.3k questions
-# from the official train subset). Opportunistic — only run if medium finishes inside the
-# GPU-hour guardrail.
+# Profile overlay: the base.yaml default named profile.
 
 data:
   profile: full

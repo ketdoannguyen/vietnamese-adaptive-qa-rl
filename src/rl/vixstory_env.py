@@ -522,21 +522,6 @@ class VixStoryEnv(gym.Env):
         out["terminal_reason"] = self._terminal_reason
         return out
 
-    def trace_row(self) -> dict[str, Any]:
-        """Canonical per-step trace row — safe fields only."""
-        assert self._world is not None
-        return {
-            "qid": self._world.qid,
-            "scenario_id": self._world.scenario_id,
-            "corpus_sha": self._world.corpus_sha,
-            "timestep": self._t,
-            "state_hash": self.state_hash(),
-            "visible_doc_ids": list(self._seen),
-            "candidate": self._candidate.to_dict(),
-            "action_mask": self._action_mask().astype(int).tolist(),
-            "last_action": int(self._history[-1]) if self._history else None,
-        }
-
     @property
     def candidate(self) -> VixStoryReaderPrediction:
         return self._candidate
@@ -580,9 +565,8 @@ class VixStoryFeatureExtractor(FeatureExtractor):
     ``dim`` / ``matrix`` helpers, and overrides the feature vector: the stock base reads the
     *extractive* reader's ``non_null_score`` / ``null_margin``, which a free-form reader never
     produces, and this adapter refuses to invent them. ``dim`` / ``vector(obs, laya_probs)`` /
-    ``matrix`` are the interface :func:`src.rl.reinforce.rollout` and
-    :class:`src.eval.policies.RLPolicy` call, so those classes drive :class:`VixStoryEnv`
-    unchanged, using **visible state only**: the candidate's presence/citation flag, real
+    ``matrix`` are the interface used by :func:`src.rl.reinforce.rollout`, using
+    **visible state only**: the candidate's presence/citation flag, real
     retrieval preview scores (when configured), the search budget and the mask. No gold answer,
     id, hop or oracle ever enters a feature.
     """

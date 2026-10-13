@@ -1,8 +1,8 @@
-"""MLP policy head trained by REINFORCE (`02_IMPLEMENTATION/05_...` §3).
+"""Shared MLP policy head trained by REINFORCE.
 
-The network is deliberately small: the sequential RL stage's job is to learn *when* to
-search/answer/abstain from visible features plus the frozen Laya prior — not to model
-language. Laya stays frozen here; nothing in this file backpropagates into it.
+The network chooses actions from visible features plus the frozen Laya prior rather
+than modeling language. Laya stays frozen here; nothing in this file backpropagates
+into it.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import torch
 import torch.nn as nn
 
 N_ACTIONS = 4
-MASK_FILL = -1e9
 
 
 class PolicyNet(nn.Module):
@@ -35,11 +34,6 @@ class PolicyNet(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = self.body(x)
         return self.policy_logits(h), self.value(h).squeeze(-1)
-
-    def masked_logits(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Mask before sampling: invalid actions must receive no probability mass."""
-        logits, _ = self.forward(x)
-        return logits.masked_fill(~mask, MASK_FILL)
 
     def config(self) -> dict[str, Any]:
         return {"d_in": self.d_in, "d_hidden": self.d_hidden, "n_actions": self.n_actions}
@@ -72,12 +66,6 @@ class PolicyNet(nn.Module):
             state = torch.load(path, map_location="cpu", weights_only=True)
         net.load_state_dict(state)
         return net
-
-
-def greedy_action(logits: torch.Tensor, mask: torch.Tensor) -> int:
-    """Deterministic evaluation policy: argmax over legal actions only."""
-    masked = logits.masked_fill(~mask, MASK_FILL)
-    return int(torch.argmax(masked).item())
 
 
 class TorchScaler:

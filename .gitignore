@@ -34,5 +34,5 @@ outputs/experiments/
 *.faiss
 *.npz
 
-# Stage run logs (evidence lives in outputs/runs/index.jsonl + docs/DECISIONS.md)
+# Local logs
 logs/

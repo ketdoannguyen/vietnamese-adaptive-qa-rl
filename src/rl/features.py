@@ -161,14 +161,3 @@ class FeatureExtractor:
         rows = [self.vector(o, None if laya_probs is None else laya_probs[i])
                 for i, o in enumerate(observations)]
         return np.vstack(rows) if rows else np.zeros((0, self.dim), dtype=np.float32)
-
-
-def mask_logits(logits: np.ndarray, mask: np.ndarray, *, fill: float = -1e9) -> np.ndarray:
-    """Masked logits for Categorical sampling. Invalid actions get no probability mass."""
-    logits = np.asarray(logits, dtype=np.float64)
-    mask = np.asarray(mask, dtype=bool)
-    if mask.shape != logits.shape:
-        raise ValueError(f"mask shape {mask.shape} != logits shape {logits.shape}")
-    if not mask.any():
-        raise ValueError("every action is masked; ABSTAIN must always be legal")
-    return np.where(mask, logits, fill)

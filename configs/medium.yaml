@@ -1,14 +1,6 @@
-# Profile overlay: 5,000-question medium run — the intended primary experiment scale for
-# this VPS when the wall-clock budget allows. Data cap and the reader-training knobs below
-# are the only deviations; every other knob stays at base.yaml so comparisons across
-# profiles are apples-to-apples.
+# Profile overlay: medium scale.
+# Only the named data profile changes here; the Laya knobs stay identical to every other
+# profile so runs remain comparable.
 
 data:
   profile: medium
-
-reader:
-  # 5,000 questions hold ~17x the pilot's 300, so 3 passes are enough (D008).
-  epochs: 3
-  # bf16 training on the Ada L4 (native bf16, no loss scaling); base.yaml's fp16 stays the
-  # inference precision. See D008.
-  bf16: true

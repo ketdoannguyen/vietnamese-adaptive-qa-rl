@@ -6,23 +6,14 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterator
 
 import yaml
-
-from src.utils.hashing import sha256_file
 
 
 def read_yaml(path: str | Path) -> dict:
     with open(path, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
-
-
-def write_yaml(path: str | Path, obj: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(obj, fh, allow_unicode=True, sort_keys=False)
 
 
 def read_json(path: str | Path) -> Any:
@@ -65,44 +56,8 @@ def read_jsonl(path: str | Path) -> Iterator[dict]:
                 raise ValueError(f"{path}:{line_no}: invalid JSON: {exc}") from exc
 
 
-def write_jsonl(path: str | Path, rows: Iterable[dict]) -> int:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    n = 0
-    with open(path, "w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-            n += 1
-    return n
-
-
 def append_jsonl(path: str | Path, row: dict) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-def append_jsonl_safe(path: str | Path, row: dict) -> None:
-    append_jsonl(path, row)
-
-
-def write_parquet(path: str | Path, rows: Iterable[dict]) -> dict:
-    """Write rows as zstd parquet; returns ``{rows, sha256, bytes}`` for the run registry."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pylist([dict(row) for row in rows])
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".parquet.tmp")
-    os.close(fd)
-    try:
-        pq.write_table(table, tmp, compression="zstd")
-        result = {"rows": table.num_rows, "sha256": sha256_file(tmp),
-                  "bytes": os.path.getsize(tmp)}
-        os.replace(tmp, path)
-        return result
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)

@@ -8,7 +8,6 @@ removed** — "hoà" and "hoa" are different words and must not be conflated.
 from __future__ import annotations
 
 import re
-import string
 import unicodedata
 
 # Vietnamese-aware tokenizer: letters (incl. diacritics), digits, and _ only.
@@ -64,14 +63,3 @@ def f1_score(prediction: str | None, ground_truths: list[str]) -> float:
         f1 = 2 * precision * recall / (precision + recall)
         best = max(best, f1)
     return best
-
-
-def answer_is_correct(prediction: str | None, ground_truths: list[str], threshold: float = 0.80) -> bool:
-    """Episode-reward criterion: normalized token-F1 >= threshold (spec 06 §3)."""
-    if prediction is None:
-        return False
-    return f1_score(prediction, ground_truths) >= threshold - 1e-12
-
-
-def safe_divide(numerator: float, denominator: float) -> float:
-    return numerator / denominator if denominator else 0.0

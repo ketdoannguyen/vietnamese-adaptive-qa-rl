@@ -70,17 +70,3 @@ def reachable_states(
                     new_frontier.append(candidate)
         frontier = new_frontier
     return states
-
-
-def retrieved_doc_ids(states: Sequence[tuple[str, ...]]) -> tuple[str, ...]:
-    """Union of the documents any reachable state can show, in first-revealed order.
-
-    This is the "retrieved context" of a question: everything the agent could actually
-    retrieve within its budget, with no oracle passage mixed in.
-    """
-    out: list[str] = []
-    for state in states:
-        for doc_id in state:
-            if doc_id not in out:
-                out.append(doc_id)
-    return tuple(out)

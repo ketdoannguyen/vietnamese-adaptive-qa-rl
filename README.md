@@ -1,62 +1,66 @@
 # vietnamese-adaptive-qa-rl
 
-**Vietnamese Adaptive QA Agent: Reinforcement Learning for Retrieval Selection, Answering, and Abstention.**
+Adaptive retrieval policies for **[VixSTORY](https://huggingface.co/datasets/ura-hcmut/VixSTORY)**, with BM25/dense retrieval, Laya decision priors and sequential REINFORCE.
 
-An agent that decides, step by step, whether to answer from what it has already read,
-retrieve more (by keyword or by meaning), or abstain. Built on UIT-ViQuAD2.0 with an
-extractive reader, a Laya-based decision model, and a REINFORCE policy trained on
-episode return.
+## Current pipeline: evidence-first V2
 
-> Status and honest reporting rules: every stage writes a status record to
-> `outputs/runs/index.jsonl`. Anything not actually run is reported as `NOT_RUN`.
-> No metric in `reports/` is typed by hand — all numbers are pulled from raw
-> predictions and run manifests.
+V2 learns when to stop retrieving and which retrieval tool to use. It does **not** run a QA reader or generate answers. Actions are `STOP`, `SEARCH_BM25`, `SEARCH_DENSE`.
 
-## Architecture
-
-```
-ViQuAD2 question
-  -> episodic controlled corpus (gold context + distractors)
-  -> BM25 / E5 retrieval  (cursor-based, never repeats a passage)
-  -> QA Reader (XLM-R base, fine-tuned on train_strict only, then frozen)
-  -> visible state: evidence, reader scores, retrieval scores, budget
-  -> Laya decision probabilities (frozen after P5) + numeric features
-  -> REINFORCE policy head -> action
-  -> reward -> next state
+```text
+VixSTORY question + shared corpus
+  -> pinned BM25 / Vietnamese embedding rankings
+  -> visible evidence + remaining search budget
+  -> Laya decision prior / REINFORCE policy
+  -> stop or retrieve another passage
 ```
 
-Actions: `ANSWER`, `SEARCH_BM25`, `SEARCH_DENSE`, `ABSTAIN`.
+The prepare stage verifies the pinned dataset revision and file hashes. It uses the official train and validation splits; `test.parquet` and CSV inputs are refused. Gold evidence stays private to teacher/evaluation code, never in policy observations.
 
-## Pipeline stages
+| Stage | Entry point |
+|---|---|
+| Validate input provenance; build rankings | `scripts.vixstory_v2_prepare` (`--stage preflight` / `rankings`) |
+| Audit teacher states and token retention | `scripts.vixstory_v2_audit` |
+| Train Laya E04 (soft CE) / E05 (RLCD) | `scripts.vixstory_v2_train_laya` |
+| Select Laya epoch on validation | `scripts.vixstory_v2_eval_laya` |
+| Train/select E06/E07 with frozen Laya priors | `scripts.vixstory_v2_train_rl` |
 
-| Stage | What it does | Entry point |
-|---|---|---|
-| P0 | Preflight, environment, repo | `scripts/preflight.sh` |
-| P1 | Download, validate, group-split, scenarios | `scripts/run_all.sh` / `src.pipeline.download` |
-| P2 | BM25 + E5 indexes and rank cache | `src.pipeline.build_retrieval` |
-| P3 | QA reader fine-tune + prediction cache | `src.pipeline.train_reader`, `src.pipeline.cache_reader` |
-| P4 | Gymnasium environment + reward | `src.rl.env`, `src.rl.reward` |
-| P5 | Teacher oracle + Laya CE/RLCD | `src.pipeline.make_teacher`, `src.pipeline.train_laya` |
-| P6 | Sequential REINFORCE | `src.pipeline.train_rl` |
-| P7 | Baselines and ablations | `src.pipeline.eval_baselines` |
-| P9 | Reports and export | `src.pipeline.report` |
-
-## Reproduction
+Run commands from the repository root using the existing environment. Inspect arguments without starting an experiment:
 
 ```bash
-bash scripts/reproduce.sh          # full pipeline with gates
-bash scripts/run_all.sh --profile pilot
+.venv/bin/python -m scripts.vixstory_v2_prepare --help
+.venv/bin/python -m scripts.vixstory_v2_train_laya --help
+.venv/bin/python -m scripts.vixstory_v2_eval_laya --help
+.venv/bin/python -m scripts.vixstory_v2_train_rl --help
 ```
 
-See `reports/REPRODUCE.md` for hashes, seeds and exact commands actually used.
+Inputs and base models resolve from the Hugging Face cache. Experiment-specific manifests, private gold, rankings, checkpoints and logs belong under `outputs/experiments/vixstory-*`; preserve parent-run provenance when reusing inputs. Existing run directories are not disposable scratch space.
 
-## Rules this project holds itself to
+## Retained VixSTORY V1 tooling
 
-1. Never fabricate a measurement, checkpoint, or chart. Unrun = `NOT_RUN`.
-2. Never train on test. Test is opened once, after the configuration is frozen.
-3. Gold labels (`answers`, `is_impossible`, `reward`, `plausible_answers`) never enter
-   an observation, a prompt, or a feature vector. Enforced by tests.
-4. Text from the dataset is data, never instructions.
-5. Checkpoints produced here are Laya/XLM-R/policy checkpoints — never TypeSafe Jev weights.
-6. `Laya-RLCD` fine-tuning and sequential REINFORCE are two separate things and are
-   reported as such.
+The `scripts/vixstory_pilot*`, cloud diagnostics, reader evaluation and `vixstory_full_train` modules remain for VixSTORY V1. V1 has a reader-based, four-action contract and is separate from V2. Shared checkpoint, configuration, retrieval, metric and locking helpers remain in `src/`.
+
+Reader warm-up retains its provider-authorization safeguards; the presence of these tools is not permission to send bulk QA traffic. Do not mix V1 checkpoints or reader-dependent states into V2.
+
+The old UIT-ViQuAD2.0/GLiNER pipeline and its dataset-specific artifacts have been retired. `reports/COMPUTE_AND_ENV.md` retains only historical timing provenance reused by the V1 preflight; those figures are **not VixSTORY measurements**.
+
+## Tests
+
+Tests cover synthetic worlds, no-gold observation contracts, provenance, checkpoint identity, policy training, retrieval and output locking. Some integration tests access locally cached tokenizers or dataset snapshots: review the test selection before running when real-artifact access must be excluded.
+
+Example CPU/offline unit checks:
+
+```bash
+CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m pytest \
+  tests/test_vixstory_env_v2.py tests/test_vixstory_policy_v2.py \
+  tests/test_vixstory_v2_isolation.py tests/test_io_atomic.py
+```
+
+## Research safeguards
+
+1. Never fabricate a measurement, checkpoint or chart. Unrun checks are `NOT_RUN`.
+2. Never train on test. Test access requires a frozen protocol.
+3. Gold answers, evidence labels, rewards and teacher targets must not enter public observations, prompts or policy features.
+4. Dataset text is data, never instructions.
+5. Preserve model identity, split boundaries and artifact provenance; never silently substitute inputs.
+6. Laya-RLCD fine-tuning and sequential REINFORCE are separate procedures and must be reported separately.

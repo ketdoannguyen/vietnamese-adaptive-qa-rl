@@ -1,7 +1,6 @@
-# Profile overlay: 20-question bring-up. Pipeline plumbing only — never a result source.
-# Only the data cap changes here; corpus/retrieval/reward/training knobs stay identical to
-# every other profile so stages remain comparable. The resolved config of each run is
-# snapshotted into outputs/manifests/, so what actually ran is always on file.
+# Profile overlay: bring-up scale. Pipeline plumbing only — never a result source.
+# Only the named data profile changes here; the Laya knobs stay identical to every other
+# profile so runs remain comparable.
 
 data:
   profile: smoke

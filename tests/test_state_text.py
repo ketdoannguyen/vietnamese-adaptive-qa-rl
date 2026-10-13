@@ -1,47 +1,50 @@
 """State text is public-only, deterministic, and hashes stably (`02_IMPL/04` §2).
 
-Real observations, not hand-built dicts: the text is rendered from what
-:class:`AdaptiveQAEnv` actually emits, so a change in either side of that contract fails
-here instead of at rollout time.
+The observation is built explicitly here in the shape ``serialize_state`` requires
+(``_REQUIRED_OBS_KEYS`` of ``src/decision/state_text.py``): the shared text contract is
+pinned without the removed ViQuAD environment, and any drift in those keys or in the
+rendered layout fails here.
 """
 
 from __future__ import annotations
-
-import copy
 
 import numpy as np
 import pytest
 
 from src.decision import state_text
 from src.decision.schema import ACTION_ORDER
-from src.pipeline import build_retrieval, train_reader, worlds
-from src.rl.env import ANSWER, SEARCH_BM25, SEARCH_DENSE, AdaptiveQAEnv
-from src.rl.reward import RewardCalculator, RewardConfig
 from src.utils.hashing import sha256_text
-from src.utils.io import atomic_write_json, read_json
-from tests import p5_fixtures as fx
+
+_BM25 = ACTION_ORDER.index("SEARCH_BM25")
+_DENSE = ACTION_ORDER.index("SEARCH_DENSE")
+_ANSWER = ACTION_ORDER.index("ANSWER")
 
 
-@pytest.fixture()
-def env(tmp_path):
-    cfg = fx.p5_config(tmp_path)
-    fx.write_all(cfg, n_train=2, n_val=1)
-    bundle = worlds.build_worlds(cfg, "train_strict", laya_regime=None)
-    return AdaptiveQAEnv(bundle.worlds, RewardCalculator(RewardConfig.from_dict(cfg)),
-                         worlds.env_config(cfg))
+def obs(**overrides) -> dict:
+    """One observation shaped like the env contract the state text renders."""
+    base = {
+        "question": "Thủ đô của Việt Nam là gì?",
+        "seen_doc_ids": ("doc_hanoi",),
+        "seen_doc_texts": ("Hà Nội là thủ đô của Việt Nam.",),
+        "candidate": {"text": "Hà Nội", "doc_id": "doc_hanoi", "provenance_ok": True,
+                      "non_null_score": 4.5, "null_score": 1.25, "null_margin": -3.25},
+        "retrieval": {"bm25_top_score": 7.5, "bm25_top_gap": 1.5,
+                      "dense_top_score": 0.83, "dense_top_gap": 0.04},
+        "history": (),
+        "optional_used": 0,
+        "remaining_optional_searches": 2,
+        "action_mask": (True, True, True, True),
+    }
+    base.update(overrides)
+    return base
 
 
-@pytest.fixture()
-def root_obs(env):
-    obs, _ = env.reset(seed=0, options={"qid": "train_strict:q000"})
-    return {**obs, "candidate": dict(obs["candidate"]), "retrieval": dict(obs["retrieval"])}
-
-
-def test_text_is_deterministic_and_carries_the_public_fields(root_obs):
-    text = state_text.serialize_state(root_obs)
-    assert text == state_text.serialize_state(root_obs)
+def test_text_is_deterministic_and_carries_the_public_fields():
+    root = obs()
+    text = state_text.serialize_state(root)
+    assert text == state_text.serialize_state(root)
     assert text.startswith("Câu hỏi:")
-    assert "Bằng chứng đã xem: 1 đoạn" in text            # the forced bootstrap revealed one
+    assert "Bằng chứng đã xem: 1 đoạn" in text
     assert "Ứng viên trả lời:" in text
     assert "Điểm đọc:" in text and "Truy hồi:" in text
     assert "Hành động đã thực hiện: (chưa có)" in text
@@ -49,115 +52,82 @@ def test_text_is_deterministic_and_carries_the_public_fields(root_obs):
     assert f"Hành động hợp lệ: {', '.join(ACTION_ORDER)}" in text  # everything legal at t=0
 
 
-def test_distinct_histories_render_distinct_text_and_hash(env):
+def test_distinct_histories_render_distinct_text():
     seen = {}
-    for history in ((), (SEARCH_BM25,), (SEARCH_DENSE,)):
-        obs, _ = env.reset(seed=0, options={"qid": "train_strict:q000"})
-        for action in history:
-            obs, *_ = env.step(action)
-        text = state_text.serialize_state(obs)
+    for history in ((), (_BM25,), (_DENSE,)):
+        text = state_text.serialize_state(obs(history=history))
         assert text not in seen.values(), f"history {history} collided with {seen}"
         seen[history] = text
-    assert "Hành động đã thực hiện: SEARCH_BM25" in seen[(SEARCH_BM25,)]
-    assert "Hành động đã thực hiện: SEARCH_DENSE" in seen[(SEARCH_DENSE,)]
+    assert "Hành động đã thực hiện: SEARCH_BM25" in seen[(_BM25,)]
+    assert "Hành động đã thực hiện: SEARCH_DENSE" in seen[(_DENSE,)]
 
 
-def test_state_hash_is_a_pure_function_of_the_text(root_obs):
-    text = state_text.serialize_state(root_obs)
+def test_state_hash_is_a_pure_function_of_the_text():
+    text = state_text.serialize_state(obs())
     assert state_text.state_hash(text) == sha256_text(text)
     assert state_text.state_hash(text) == state_text.state_hash(text)
     assert state_text.state_hash(text) != state_text.state_hash(text + "x")
 
 
-def test_forbidden_keys_are_rejected_before_rendering(root_obs):
+def test_forbidden_keys_are_rejected_before_rendering():
     for needle in ("gold_answer", "is_impossible", "expected_action", "plausible_answers"):
-        bad = {**root_obs, needle: "anything"}
+        bad = {**obs(), needle: "anything"}
         with pytest.raises(ValueError, match="forbidden"):
             state_text.serialize_state(bad)
         with pytest.raises(ValueError, match="forbidden"):
             state_text.assert_state_is_public(bad)
 
 
-def test_nested_forbidden_keys_are_found(root_obs):
-    bad = copy.deepcopy(root_obs)
+def test_nested_forbidden_keys_are_found():
+    bad = obs()
     bad["candidate"]["plausible_answers"] = ["x"]
     with pytest.raises(ValueError, match="forbidden"):
         state_text.serialize_state(bad)
 
 
-def test_a_missing_observation_key_is_named(root_obs):
-    bad = {key: value for key, value in root_obs.items() if key != "action_mask"}
+def test_a_missing_observation_key_is_named():
+    bad = {key: value for key, value in obs().items() if key != "action_mask"}
     with pytest.raises(KeyError, match="action_mask"):
         state_text.serialize_state(bad)
 
 
-def test_a_forbidden_literal_in_public_text_is_a_leak(root_obs):
-    bad = {**root_obs, "question": "gold_answer của câu hỏi này là gì?"}
+def test_a_forbidden_literal_in_public_text_is_a_leak():
+    bad = obs(question="gold_answer của câu hỏi này là gì?")
     with pytest.raises(ValueError, match="leaks"):
         state_text.serialize_state(bad)
 
 
-def test_long_evidence_is_snippet_capped(root_obs):
-    obs = {**root_obs, "seen_doc_ids": ("doc:1",),
-           "seen_doc_texts": (" ".join(["từ"] * 500),)}
-    text = state_text.serialize_state(obs, max_snippet_chars=40)
+def test_long_evidence_is_snippet_capped():
+    obs_long = obs(seen_doc_ids=("doc:1",), seen_doc_texts=(" ".join(["từ"] * 500),))
+    text = state_text.serialize_state(obs_long, max_snippet_chars=40)
     line = [ln for ln in text.splitlines() if ln.startswith("[1]")][0]
     assert line.endswith("…")
     assert len(line.split(" ", 2)[2]) == 41  # 40 chars + the ellipsis
 
 
-def test_floats_render_with_fixed_precision_and_non_finite_as_na(root_obs):
-    obs = copy.deepcopy(root_obs)
-    obs["candidate"]["non_null_score"] = float("nan")
-    obs["retrieval"]["bm25_top_gap"] = float("inf")
-    text = state_text.serialize_state(obs)
+def test_floats_render_with_fixed_precision_and_non_finite_as_na():
+    bad = obs()
+    bad["candidate"]["non_null_score"] = float("nan")
+    bad["retrieval"]["bm25_top_gap"] = float("inf")
+    text = state_text.serialize_state(bad)
     assert "non_null=n/a" in text and "khoảng cách n/a" in text
-    obs["candidate"]["non_null_score"] = 1.0 / 3.0
-    assert "non_null=0.333" in state_text.serialize_state(obs)
+    bad["candidate"]["non_null_score"] = 1.0 / 3.0
+    assert "non_null=0.333" in state_text.serialize_state(bad)
 
 
-def test_masked_actions_are_absent_from_the_valid_list(env):
-    obs, _ = env.reset(seed=0, options={"qid": "train_strict:q000"})
-    obs, *_ = env.step(SEARCH_BM25)
-    obs, *_ = env.step(SEARCH_DENSE)
-    mask = np.asarray(obs["action_mask"], dtype=bool)
+def test_masked_actions_are_absent_from_the_valid_list():
+    spent = obs(history=(_BM25, _DENSE), optional_used=2,
+                remaining_optional_searches=0,
+                action_mask=(True, False, False, True))
+    mask = np.asarray(spent["action_mask"], dtype=bool)
     assert not mask[1:3].any(), "the two optional searches are spent; both must be masked"
-    text = state_text.serialize_state(obs)
+    text = state_text.serialize_state(spent)
     valid_line = text.split("Hành động hợp lệ: ", 1)[1].splitlines()[0]
     expected = ", ".join(name for index, name in enumerate(ACTION_ORDER) if mask[index])
     assert valid_line == expected
     assert "SEARCH_BM25" not in valid_line and "SEARCH_DENSE" not in valid_line
 
 
-def test_answer_action_renders_as_history(env):
-    obs, _ = env.reset(seed=0, options={"qid": "train_strict:q000"})
-    obs, _, terminated, _, _ = env.step(ANSWER)
-    assert terminated
-    assert "Hành động đã thực hiện: ANSWER" in state_text.serialize_state(obs)
-
-
-def test_a_state_cache_over_changed_sources_is_refused(tmp_path):
-    """D011: worlds must refuse a cache whose recorded inputs changed since it was built."""
-    cfg = fx.p5_config(tmp_path)
-    fx.write_all(cfg, n_train=2, n_val=1)
-    rankings = build_retrieval.rankings_path(cfg, "train_strict")
-    with rankings.open("a", encoding="utf-8") as handle:
-        handle.write("\n")  # any byte-level change must be detected
-    with pytest.raises(ValueError, match="stale.*rankings changed.*rerun cache_reader"):
-        worlds.build_worlds(cfg, "train_strict", laya_regime=None)
-
-
-def test_a_state_cache_for_a_reselected_reader_is_refused(tmp_path):
-    """D013: the cache bakes candidate decisions; a drifted reader contract must refuse.
-
-    ``train_reader --reselect`` rewrites the threshold without touching the weights, so
-    serving a cache built under the old threshold would silently change the environment.
-    """
-    cfg = fx.p5_config(tmp_path)
-    fx.write_all(cfg, n_train=2, n_val=1)
-    contract_path = train_reader.reader_dir(cfg) / train_reader.INFERENCE_FILE
-    contract = read_json(contract_path)
-    contract["null_score_diff_threshold"] = 2.0
-    atomic_write_json(contract_path, contract)
-    with pytest.raises(ValueError, match="reader contract.*rerun cache_reader"):
-        worlds.build_worlds(cfg, "train_strict", laya_regime=None)
+def test_answer_action_renders_as_history():
+    text = state_text.serialize_state(obs(history=(_ANSWER,)))
+    assert "Hành động đã thực hiện: ANSWER" in text

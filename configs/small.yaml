@@ -1,4 +1,6 @@
-# Profile overlay: 1,000 questions per strict split for bounded evaluation.
-# The cap lives in base.yaml; this overlay records the profile in run snapshots.
+# Profile overlay: small scale.
+# Only the named data profile changes here; the Laya knobs stay identical to every other
+# profile so runs remain comparable.
+
 data:
   profile: small

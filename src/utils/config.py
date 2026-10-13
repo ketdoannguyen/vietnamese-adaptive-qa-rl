@@ -1,4 +1,9 @@
-"""Config loading: base.yaml + profile overlay, with runtime pinning support."""
+"""Config loading: ``configs/base.yaml`` + named profile overlay.
+
+Retained for the VixSTORY V1 tooling: ``scripts/vixstory_pilot_laya.py`` reads the ``laya``
+block and the named data profile through here. An explicit ``--config`` path is deep-merged
+on top of the profile.
+"""
 
 from __future__ import annotations
 
@@ -35,31 +40,6 @@ def load_config(profile: str | None = None, *, extra: dict | None = None) -> dic
     if extra:
         cfg = _deep_merge(cfg, extra)
     return cfg
-
-
-def resolve(cfg: dict, key: str) -> Path:
-    """Resolve a path from cfg['paths'][key] against the repo root."""
-    p = Path(cfg["paths"][key])
-    return p if p.is_absolute() else REPO_ROOT / p
-
-
-def profile_limit(cfg: dict, profile: str) -> int | None:
-    """Number of QA records a data profile uses (``None`` = no cap)."""
-    caps = cfg["data"]["caps"]
-    if profile not in caps:
-        raise ValueError(f"unknown profile {profile!r}; known: {sorted(caps)}")
-    return caps[profile]
-
-
-def snapshot_config(cfg: dict, out_path: str | Path) -> str:
-    """Write the fully-resolved config next to a run and return its sha256."""
-    import json
-    from src.utils.hashing import sha256_text
-    text = json.dumps(cfg, ensure_ascii=False, sort_keys=True, indent=2)
-    p = Path(out_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(text + "\n", encoding="utf-8")
-    return sha256_text(text)
 
 
 def add_profile_args(parser: Any) -> None:

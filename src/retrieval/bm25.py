@@ -1,14 +1,13 @@
-"""BM25 retrieval over a controlled episode corpus.
+"""BM25 retrieval over an explicitly supplied document set.
 
-The index is built per scenario corpus so cross-split documents can never leak into
-candidates (spec 02 §2). BM25 has no pretrained weights; it is pure statistics over the
-same Vietnamese tokenizer used for queries.
+BM25 has no pretrained weights; it uses corpus statistics and the same Vietnamese
+tokenizer for documents and queries.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Mapping
 
 from rank_bm25 import BM25Okapi
 

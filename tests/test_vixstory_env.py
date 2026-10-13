@@ -370,19 +370,18 @@ def test_reset_seed_reproduces_the_same_episode():
 # --- downstream compatibility ----------------------------------------------------------
 def test_observation_supports_the_baseline_policy_interface():
     from src.eval.policies import choose_tool, legal_actions
-    from src.rl.features import mask_logits
 
     env = env_for(simple_world("q19"))
     obs, _ = env.reset(options={"qid": "q19"})
     mask = np.asarray(obs["action_mask"], dtype=bool)
-    # B1's decide rule and B4/B5's tool choice read only the mask and the search history —
-    # no reader scores — so the baseline policies drive this env unchanged.
+    # Tool choice reads only the action mask and search history, not reader scores.
     assert ABSTAIN in legal_actions(mask)
     assert choose_tool(obs, mode="alternate") == SEARCH_BM25  # first search ties to BM25
     obs, _, _, _, _ = env.step(SEARCH_BM25)
     assert choose_tool(obs, mode="alternate") == SEARCH_DENSE  # BM25 already used once
-    masked = mask_logits(np.zeros(N_ACTIONS), np.asarray(obs["action_mask"], dtype=bool))
-    assert np.all(masked[~np.asarray(obs["action_mask"], dtype=bool)] == -1e9)
+    assert ABSTAIN in legal_actions(obs["action_mask"])
+    with pytest.raises(ValueError, match="ABSTAIN must always be legal"):
+        legal_actions(np.zeros(N_ACTIONS, dtype=bool))
 
 
 def test_reinforce_rollout_and_loss_drive_the_vixstory_env():

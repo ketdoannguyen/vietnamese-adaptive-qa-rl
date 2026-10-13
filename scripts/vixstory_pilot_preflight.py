@@ -87,7 +87,7 @@ MODEL_REPOS = ("convaiinnovations/laya-multilingual",)
 WEIGHT_GLOBS = {
     "convaiinnovations/laya-multilingual": ("model.safetensors",),
 }
-# Pinned snapshot revision: Laya matches the P5 trainer manifests and docs/DECISIONS.md. A cache
+# Pinned Laya snapshot; shared provenance is retained in reports/COMPUTE_AND_ENV.md. A cache
 # that resolved a different revision is a blocker, not a silent substitution.
 MODEL_REVISIONS = {
     "convaiinnovations/laya-multilingual": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
@@ -97,7 +97,7 @@ MODEL_REVISIONS = {
 CORE_DEPS = ("torch", "transformers", "accelerate", "sentence_transformers", "pyarrow", "numpy")
 PARAM_EFFICIENT_DEPS = ("peft", "trl", "bitsandbytes")
 
-# --- episode / estimation config (configs/base.yaml retrieval block) ------
+# --- VixSTORY pilot episode / estimation assumptions ----------------------
 EPISODE = {"bootstrap_tool": "bm25", "bootstrap_passages": 1,
            "passage_per_search_action": 1, "max_optional_search": 2, "tools": ("bm25", "dense")}
 DEFAULT_CHARS_PER_TOKEN = 2.5  # heuristic for Vietnamese subword text; not a tokenizer run

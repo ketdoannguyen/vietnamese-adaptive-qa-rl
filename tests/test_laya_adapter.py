@@ -7,18 +7,11 @@ tested is the contract the RL stage depends on: rows follow input order, columns
 
 from __future__ import annotations
 
-import subprocess
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-from src.decision.laya_adapter import CHOICE_TOLERANCE, LayaAdapter, QUESTION_ID, \
-    checkpoint_model_hash
+from src.decision.laya_adapter import CHOICE_TOLERANCE, QUESTION_ID, LayaAdapter, checkpoint_model_hash
 from src.decision.schema import ACTION_ORDER, build_questions_field
-
-ROOT = Path(__file__).resolve().parents[1]
 
 #: Sums to exactly 1; keys deliberately in neither canonical nor alphabetical order.
 PROBS = {"ABSTAIN": 0.1, "SEARCH_DENSE": 0.2, "SEARCH_BM25": 0.3, "ANSWER": 0.4}
@@ -165,19 +158,3 @@ def test_model_hash_is_stable_and_sensitive_to_every_identity_file(tmp_path):
     (root / "model.safetensors").unlink()
     with pytest.raises(FileNotFoundError, match="not a Laya checkpoint"):
         checkpoint_model_hash(root)
-
-
-# --------------------------------------------------- Laya-only isolation (GLiNER boundary)
-
-
-def test_the_laya_only_import_path_does_not_import_gliner2():
-    """The baseline environment has no gliner2 extra; importing the Laya path must not need it."""
-    script = (
-        "import sys\n"
-        "import src.decision.laya_adapter\n"
-        "print('GLINER2:' + str('gliner2' in sys.modules))\n"
-    )
-    proc = subprocess.run([sys.executable, "-c", script], cwd=ROOT,
-                          capture_output=True, text=True, timeout=300)
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().endswith("GLINER2:False")

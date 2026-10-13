@@ -1,6 +1,0 @@
-split,action,count,share,mean_soft_mass,masked_at_states
-train_strict,ANSWER,9643,0.275569,0.236210,6261
-train_strict,SEARCH_BM25,228,0.006516,0.142601,19996
-train_strict,SEARCH_DENSE,180,0.005144,0.108511,19996
-train_strict,ABSTAIN,24942,0.712771,0.512677,0
-train_strict,TARGET_ERROR_PROXY,,,0.270886,

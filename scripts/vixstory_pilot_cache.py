@@ -77,10 +77,6 @@ CACHE_NAME = "reader-cache-cloud-v3-max16384.json"
 #: Coverable split roles -> their frozen-manifest record names.
 MANIFEST_SPLITS = {"train": "pilot_300", "dev": "train_dev_200", "validation": "validation_246"}
 STAGES = tuple(MANIFEST_SPLITS)
-#: Per-role QA source. ``validation`` rows come from the pinned validation file; everything else
-#: from official train. The official test file is never among these.
-QA_SOURCES = {"train": "data/train.parquet", "dev": "data/train.parquet",
-              "validation": "data/validation.parquet"}
 FORBIDDEN_QA_FILENAME = "test.parquet"
 COVERAGE_NAME = "cache-coverage.json"
 COVERAGE_ARTIFACT = "vixstory_pilot_reader_cache_coverage"

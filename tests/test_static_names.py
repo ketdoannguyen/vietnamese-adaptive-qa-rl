@@ -1,10 +1,4 @@
-"""Static sweep for the D019 finding-1 class: a function that loads a global name
-the module never binds and builtins does not provide is a guaranteed ``NameError``.
-
-``tests/test_correctness.py`` covers one critical function by walking bytecode; this
-sweep covers every module in ``src/`` at once, because the failure only surfaces when
-the affected stage actually runs — hours into a GPU chain.
-"""
+"""Detect undefined global names before a long-running training stage reaches them."""
 
 from __future__ import annotations
 

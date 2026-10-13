@@ -22,10 +22,7 @@ data/cache/
 data/diagnostics/
 
 # Model weights and large outputs
-outputs/models/
-outputs/predictions/
-outputs/runs/
-outputs/experiments/
+outputs/
 *.safetensors
 *.bin
 *.pt
